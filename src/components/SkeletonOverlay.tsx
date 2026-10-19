@@ -22,7 +22,7 @@ interface SkeletonOverlayProps {
   onLandmarkPress?: (index: number) => void;
 }
 
-export const SkeletonOverlay: React.FC<SkeletonOverlayProps> = ({
+export const SkeletonOverlay = React.memo<SkeletonOverlayProps>(({
   landmarks,
   width,
   height,
@@ -42,22 +42,24 @@ export const SkeletonOverlay: React.FC<SkeletonOverlayProps> = ({
     return null;
   }
 
-  // Transform normalized (0-1) coordinates into scaled, offset pixel coordinates
-  const transformPoint = (lm: Landmark) => {
-    // Center of screen
-    const centerX = width / 2;
-    const centerY = height / 2;
+  // Pre-calculate transform points for efficiency
+  const centerX = width / 2;
+  const centerY = height / 2;
 
+  const pts = new Array(landmarks.length);
+  for (let i = 0; i < landmarks.length; i++) {
+    const lm = landmarks[i];
+    if (!lm) {
+      pts[i] = { x: centerX, y: centerY };
+      continue;
+    }
     const rawX = lm.x * width;
     const rawY = lm.y * height;
-
-    const scaledX = centerX + (rawX - centerX) * scale + offsetX;
-    const scaledY = centerY + (rawY - centerY) * scale + offsetY;
-
-    return { x: scaledX, y: scaledY };
-  };
-
-  const pts = landmarks.map(transformPoint);
+    pts[i] = {
+      x: centerX + (rawX - centerX) * scale + offsetX,
+      y: centerY + (rawY - centerY) * scale + offsetY,
+    };
+  }
 
   return (
     <View style={[StyleSheet.absoluteFill, { pointerEvents: onLandmarkPress ? 'auto' : 'none' }]}>
@@ -69,7 +71,6 @@ export const SkeletonOverlay: React.FC<SkeletonOverlayProps> = ({
           const lmA = landmarks[idxA];
           const lmB = landmarks[idxB];
 
-          // Check visibility threshold
           const visA = lmA?.visibility !== undefined ? lmA.visibility : 1;
           const visB = lmB?.visibility !== undefined ? lmB.visibility : 1;
           if (visA < 0.3 || visB < 0.3) return null;
@@ -98,7 +99,6 @@ export const SkeletonOverlay: React.FC<SkeletonOverlayProps> = ({
           const vis = lm?.visibility !== undefined ? lm.visibility : 1;
           if (vis < 0.3) return null;
 
-          // Don't clutter with every minor facial point, focus on core joints
           const isMajorJoint =
             idx === POSE_LANDMARKS.NOSE ||
             idx === POSE_LANDMARKS.LEFT_SHOULDER ||
@@ -142,4 +142,6 @@ export const SkeletonOverlay: React.FC<SkeletonOverlayProps> = ({
       </Svg>
     </View>
   );
-};
+});
+
+SkeletonOverlay.displayName = 'SkeletonOverlay';
