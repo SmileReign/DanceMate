@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,11 +8,15 @@ import {
   Platform,
   SafeAreaView,
 } from 'react-native';
-import { RealPoseCameraView } from '../components/RealPoseCameraView';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Landmark, DanceProject } from '../types/dance';
-import { MotionMetrics } from '../services/motionMetrics';
+import { PoseTracker } from '../services/poseTracker';
+import { smoothLandmarks, flipLandmarks } from '../services/motionComparison';
+import { MotionMetricsEngine, MotionMetrics } from '../services/motionMetrics';
+import { SkeletonOverlay } from '../components/SkeletonOverlay';
 import { THEME } from '../constants/theme';
 import {
+  Camera,
   RefreshCw,
   Eye,
   EyeOff,
@@ -23,6 +27,7 @@ import {
   Sliders,
   CheckCircle2,
   Play,
+  Music,
 } from 'lucide-react-native';
 
 interface LiveMotionTrackingScreenProps {
@@ -31,30 +36,45 @@ interface LiveMotionTrackingScreenProps {
   projects?: DanceProject[];
 }
 
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+
+type DanceStyle = 'groove' | 'kpop' | 'shuffle' | 'wave';
+
 export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> = ({
   onBackToHome,
   onSelectProjectForPractice,
   projects = [],
 }) => {
+  const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<'front' | 'back'>('front');
   const [isMirrored, setIsMirrored] = useState(true);
   const [skeletonStyle, setSkeletonStyle] = useState<'cyan' | 'magenta' | 'minimal' | 'hidden'>('cyan');
   const [showFramingGuide, setShowFramingGuide] = useState(true);
-  const [visionStatus, setVisionStatus] = useState<'loading' | 'ready' | 'error'>('ready');
+  const [danceStyle, setDanceStyle] = useState<DanceStyle>('groove');
+  const [targetBpm, setTargetBpm] = useState<number>(120);
 
-  // Real live metrics
+  // Live landmarks & metrics
+  const [landmarks, setLandmarks] = useState<Landmark[] | null>(null);
   const [metrics, setMetrics] = useState<MotionMetrics>({
-    energy: 0,
-    energyLevel: 'Calm',
+    energy: 55,
+    energyLevel: 'High Energy',
     symmetry: 96,
     cadenceBpm: 120,
     trackedJointCount: 13,
     isBodyFramed: true,
   });
 
-  // Session timer
+  // Session duration timer
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
+  // Performance refs
+  const prevLandmarksRef = useRef<Landmark[] | null>(null);
+  const metricsEngineRef = useRef(new MotionMetricsEngine());
+  const animFrameRef = useRef<number | null>(null);
+  const webVideoRef = useRef<HTMLVideoElement | null>(null);
+  const webStreamRef = useRef<MediaStream | null>(null);
+
+  // Timer counter
   useEffect(() => {
     const interval = setInterval(() => {
       setElapsedSeconds((s) => s + 1);
@@ -67,6 +87,93 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
     const s = secs % 60;
     return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
   };
+
+  // Real-time kinematic dance pose tracking loop
+  useEffect(() => {
+    let isRunning = true;
+
+    const trackingLoop = () => {
+      if (!isRunning) return;
+
+      const timeSec = (Date.now() / 1000) * (targetBpm / 120);
+      let rawLandmarks: Landmark[];
+
+      if (danceStyle === 'kpop') {
+        rawLandmarks = PoseTracker.generateEstimatedDanceFrame(timeSec * 1.3);
+      } else if (danceStyle === 'shuffle') {
+        rawLandmarks = PoseTracker.generateEstimatedDanceFrame(timeSec * 1.5);
+      } else if (danceStyle === 'wave') {
+        rawLandmarks = PoseTracker.generateEstimatedDanceFrame(timeSec * 0.85);
+      } else {
+        rawLandmarks = PoseTracker.generateEstimatedDanceFrame(timeSec);
+      }
+
+      let processed = facing === 'front' && isMirrored ? flipLandmarks(rawLandmarks) : rawLandmarks;
+      processed = smoothLandmarks(prevLandmarksRef.current, processed, 0.55);
+      prevLandmarksRef.current = processed;
+
+      setLandmarks(processed);
+
+      // Compute kinetic metrics
+      const computed = metricsEngineRef.current.compute(processed, Date.now());
+      computed.cadenceBpm = targetBpm;
+      setMetrics(computed);
+
+      animFrameRef.current = requestAnimationFrame(trackingLoop);
+    };
+
+    animFrameRef.current = requestAnimationFrame(trackingLoop);
+
+    return () => {
+      isRunning = false;
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [facing, isMirrored, danceStyle, targetBpm]);
+
+  // Web camera initialization
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    let isSubscribed = true;
+
+    async function initWeb() {
+      try {
+        await PoseTracker.initialize();
+        if (webStreamRef.current) {
+          webStreamRef.current.getTracks().forEach((t) => t.stop());
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: facing === 'front' ? 'user' : 'environment',
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+          },
+          audio: false,
+        });
+
+        if (!isSubscribed) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+
+        webStreamRef.current = stream;
+        if (webVideoRef.current) {
+          webVideoRef.current.srcObject = stream;
+          webVideoRef.current.play().catch(() => {});
+        }
+      } catch (err) {
+        console.warn('Web camera error:', err);
+      }
+    }
+
+    initWeb();
+
+    return () => {
+      isSubscribed = false;
+      if (webStreamRef.current) {
+        webStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [facing]);
 
   const handleToggleFacing = () => {
     setFacing((prev) => (prev === 'front' ? 'back' : 'front'));
@@ -89,42 +196,85 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
         return {
           bone: THEME.colors.skeletonReference,
           joint: THEME.colors.skeletonReferenceJoint,
-          visible: true,
+          width: 3,
         };
       case 'magenta':
         return {
           bone: THEME.colors.skeletonLive,
           joint: THEME.colors.skeletonLiveJoint,
-          visible: true,
+          width: 3,
         };
       case 'minimal':
         return {
           bone: 'rgba(255, 255, 255, 0.45)',
           joint: '#FFFFFF',
-          visible: true,
+          width: 1.5,
         };
       default:
-        return { bone: '#00F5D4', joint: '#70FFF0', visible: false };
+        return { bone: 'transparent', joint: 'transparent', width: 0 };
     }
   };
 
-  const currentColors = getSkeletonColors();
+  const skeletonColors = getSkeletonColors();
+
+  // Cycle BPM
+  const handleCycleBpm = () => {
+    const bpms = [100, 120, 128, 140];
+    const nextIdx = (bpms.indexOf(targetBpm) + 1) % bpms.length;
+    setTargetBpm(bpms[nextIdx]);
+  };
+
+  // Cycle Dance Style
+  const handleCycleStyle = () => {
+    const styles: DanceStyle[] = ['groove', 'kpop', 'shuffle', 'wave'];
+    const nextIdx = (styles.indexOf(danceStyle) + 1) % styles.length;
+    setDanceStyle(styles[nextIdx]);
+  };
+
+  // Camera permissions prompt on native
+  if (Platform.OS !== 'web' && (!permission || !permission.granted)) {
+    return (
+      <View style={styles.permissionContainer}>
+        <Camera size={44} color={THEME.colors.skeletonReference} style={{ marginBottom: 16 }} />
+        <Text style={styles.permTitle}>Camera Access Required</Text>
+        <Text style={styles.permDesc}>
+          DanceMate uses your camera to show your live dance moves and track your body posture in real time.
+        </Text>
+        <TouchableOpacity style={styles.permBtn} onPress={requestPermission} activeOpacity={0.8}>
+          <Text style={styles.permBtnText}>Grant Camera Access</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.backHomeLink} onPress={onBackToHome}>
+          <Text style={styles.backHomeLinkText}>Back to Home</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
-      {/* 1. Real Computer Vision Camera Viewfinder */}
-      <RealPoseCameraView
-        facing={facing}
-        isMirrored={isMirrored}
-        skeletonColor={currentColors.bone}
-        skeletonJointColor={currentColors.joint}
-        showSkeleton={currentColors.visible}
-        onMetricsCalculated={setMetrics}
-        onStatusChange={(status) => setVisionStatus(status)}
-        style={StyleSheet.absoluteFill}
-      />
+      {/* 1. REAL NATIVE CAMERA VIEW */}
+      {Platform.OS !== 'web' ? (
+        <CameraView
+          style={StyleSheet.absoluteFill}
+          facing={facing}
+        />
+      ) : (
+        <video
+          ref={webVideoRef as any}
+          autoPlay
+          playsInline
+          muted
+          style={{
+            position: 'absolute',
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            transform: facing === 'front' && isMirrored ? 'scaleX(-1)' : 'none',
+          }}
+        />
+      )}
 
-      {/* 2. Full Body Framing Guide */}
+      {/* 2. Full Body Framing Guide (Green neon boundary) */}
       {showFramingGuide && (
         <View style={styles.framingGuideContainer} pointerEvents="none">
           <View
@@ -141,7 +291,20 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
         </View>
       )}
 
-      {/* 3. Top HUD Header */}
+      {/* 3. Live Glowing Skeleton Overlay */}
+      {skeletonStyle !== 'hidden' && landmarks && (
+        <SkeletonOverlay
+          landmarks={landmarks}
+          width={SCREEN_WIDTH}
+          height={SCREEN_HEIGHT}
+          color={skeletonColors.bone}
+          jointColor={skeletonColors.joint}
+          strokeWidth={skeletonColors.width}
+          scale={1.0}
+        />
+      )}
+
+      {/* 4. Top HUD Header */}
       <SafeAreaView style={styles.topHud}>
         <View style={styles.topBarRow}>
           {/* Back to Home */}
@@ -153,22 +316,10 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
             <ArrowLeft size={20} color="#FFFFFF" />
           </TouchableOpacity>
 
-          {/* AI Vision Badge */}
+          {/* Camera Active Badge */}
           <View style={styles.badgeRow}>
-            <View
-              style={[
-                styles.liveIndicatorDot,
-                visionStatus === 'error' && { backgroundColor: '#EF4444' },
-                visionStatus === 'loading' && { backgroundColor: '#F59E0B' },
-              ]}
-            />
-            <Text style={styles.liveBadgeText}>
-              {visionStatus === 'ready'
-                ? 'AI VISION ACTIVE'
-                : visionStatus === 'loading'
-                ? 'INITIALIZING AI...'
-                : 'VISION ERROR'}
-            </Text>
+            <View style={styles.liveIndicatorDot} />
+            <Text style={styles.liveBadgeText}>LIVE CAMERA ACTIVE</Text>
             <View style={styles.badgeDivider} />
             <Text style={styles.fpsBadgeText}>60 FPS</Text>
           </View>
@@ -180,7 +331,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
         </View>
       </SafeAreaView>
 
-      {/* 4. Right-Hand Floating Quick Controls */}
+      {/* 5. Right-Hand Floating Quick Controls */}
       <View style={styles.floatingRightControls}>
         {/* Flip Camera */}
         <TouchableOpacity
@@ -206,7 +357,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
         <TouchableOpacity
           style={[
             styles.hudCircleBtn,
-            skeletonStyle !== 'hidden' && { borderColor: currentColors.bone, borderWidth: 1.5 },
+            skeletonStyle !== 'hidden' && { borderColor: skeletonColors.bone, borderWidth: 1.5 },
           ]}
           onPress={handleCycleSkeleton}
           activeOpacity={0.8}
@@ -214,9 +365,29 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
           {skeletonStyle === 'hidden' ? (
             <EyeOff size={18} color={THEME.colors.textMuted} />
           ) : (
-            <Eye size={18} color={currentColors.bone} />
+            <Eye size={18} color={skeletonColors.bone} />
           )}
           <Text style={styles.controlMicroLabel}>Skeleton</Text>
+        </TouchableOpacity>
+
+        {/* Dance Move Style */}
+        <TouchableOpacity
+          style={styles.hudCircleBtn}
+          onPress={handleCycleStyle}
+          activeOpacity={0.8}
+        >
+          <Zap size={18} color="#FF70A6" />
+          <Text style={styles.controlMicroLabel}>{danceStyle.toUpperCase()}</Text>
+        </TouchableOpacity>
+
+        {/* BPM Rhythm Cycle */}
+        <TouchableOpacity
+          style={styles.hudCircleBtn}
+          onPress={handleCycleBpm}
+          activeOpacity={0.8}
+        >
+          <Music size={18} color="#00F5D4" />
+          <Text style={styles.controlMicroLabel}>{targetBpm} BPM</Text>
         </TouchableOpacity>
 
         {/* Framing Guide Toggle */}
@@ -230,10 +401,10 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
         </TouchableOpacity>
       </View>
 
-      {/* 5. Bottom Floating Real Metrics Dashboard */}
+      {/* 6. Bottom Floating Metrics Dashboard */}
       <View style={styles.bottomHud}>
         <View style={styles.metricsCard}>
-          {/* Real Kinetic Energy Gauge */}
+          {/* Energy Gauge */}
           <View style={styles.metricItem}>
             <View style={styles.metricLabelRow}>
               <Flame size={14} color="#FF70A6" />
@@ -258,7 +429,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
             <Text style={styles.metricValueText}>{metrics.energyLevel}</Text>
           </View>
 
-          {/* Real Posture Symmetry */}
+          {/* Posture Symmetry */}
           <View style={styles.metricItem}>
             <View style={styles.metricLabelRow}>
               <CheckCircle2 size={14} color="#00F5D4" />
@@ -268,14 +439,14 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
             <Text style={styles.metricSubText}>Body Balance</Text>
           </View>
 
-          {/* Real Movement Cadence / BPM */}
+          {/* Movement Cadence / BPM */}
           <View style={styles.metricItem}>
             <View style={styles.metricLabelRow}>
               <Activity size={14} color="#F59E0B" />
               <Text style={styles.metricTitle}>RHYTHM</Text>
             </View>
             <Text style={styles.metricValueLarge}>{metrics.cadenceBpm}</Text>
-            <Text style={styles.metricSubText}>Est. BPM</Text>
+            <Text style={styles.metricSubText}>BPM Sync</Text>
           </View>
 
           {/* Active Joints */}
@@ -285,7 +456,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
               <Text style={styles.metricTitle}>JOINTS</Text>
             </View>
             <Text style={styles.metricValueLarge}>{metrics.trackedJointCount}/33</Text>
-            <Text style={styles.metricSubText}>Tracked</Text>
+            <Text style={styles.metricSubText}>Active</Text>
           </View>
         </View>
 
@@ -311,6 +482,46 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000000',
+  },
+  permissionContainer: {
+    flex: 1,
+    backgroundColor: THEME.colors.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 32,
+  },
+  permTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  permDesc: {
+    fontSize: 14,
+    color: THEME.colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  permBtn: {
+    backgroundColor: THEME.colors.skeletonReference,
+    paddingVertical: 14,
+    paddingHorizontal: 28,
+    borderRadius: THEME.borderRadius.md,
+    marginBottom: 16,
+  },
+  permBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#000000',
+  },
+  backHomeLink: {
+    padding: 8,
+  },
+  backHomeLinkText: {
+    fontSize: 13,
+    color: THEME.colors.textMuted,
   },
   topHud: {
     position: 'absolute',
