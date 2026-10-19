@@ -37,7 +37,8 @@
           "microphonePermission": "DanceMate needs access to your microphone when recording practice sessions."
         }
       ],
-      "expo-font"
+      "expo-font",
+      "expo-video"
     ],
     "web": {
       "favicon": "./assets/favicon.png",

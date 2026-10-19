@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { View, StyleSheet, Platform } from 'react-native';
-import { Video, ResizeMode, AVPlaybackStatus } from 'expo-av';
+import { useVideoPlayer, VideoView } from 'expo-video';
 
 export interface DanceVideoPlayerRef {
   playAsync: () => Promise<void>;
@@ -35,44 +35,117 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
     },
     ref
   ) => {
-    const videoRef = useRef<Video | null>(null);
     const webVideoRef = useRef<HTMLVideoElement | null>(null);
 
-    useImperativeHandle(ref, () => ({
-      playAsync: async () => {
-        if (Platform.OS === 'web' && webVideoRef.current) {
-          try {
-            await webVideoRef.current.play();
-          } catch {}
-        } else if (videoRef.current) {
-          await videoRef.current.playAsync();
+    // Modern Expo SDK 58 expo-video player
+    const player = useVideoPlayer(sourceUri || null, (p) => {
+      p.loop = false;
+      p.muted = isMuted;
+      p.playbackRate = playbackSpeed;
+      p.timeUpdateEventInterval = 0.05;
+    });
+
+    // Expose imperative handle compatible with both Mobile and Web
+    useImperativeHandle(
+      ref,
+      () => ({
+        playAsync: async () => {
+          if (Platform.OS === 'web' && webVideoRef.current) {
+            try {
+              await webVideoRef.current.play();
+            } catch {}
+          } else if (player) {
+            try {
+              player.play();
+            } catch {}
+          }
+        },
+        pauseAsync: async () => {
+          if (Platform.OS === 'web' && webVideoRef.current) {
+            webVideoRef.current.pause();
+          } else if (player) {
+            try {
+              player.pause();
+            } catch {}
+          }
+        },
+        setPositionAsync: async (positionMillis: number) => {
+          const targetSeconds = positionMillis / 1000;
+          if (Platform.OS === 'web' && webVideoRef.current) {
+            webVideoRef.current.currentTime = targetSeconds;
+          } else if (player) {
+            try {
+              player.currentTime = targetSeconds;
+              if (onPlaybackUpdate) {
+                onPlaybackUpdate(targetSeconds, player.duration || 1);
+              }
+            } catch {}
+          }
+        },
+        setRateAsync: async (rate: number) => {
+          if (Platform.OS === 'web' && webVideoRef.current) {
+            webVideoRef.current.playbackRate = rate;
+          } else if (player) {
+            try {
+              player.playbackRate = rate;
+            } catch {}
+          }
+        },
+        getNativeVideoElement: () => {
+          return webVideoRef.current;
+        },
+      }),
+      [player, onPlaybackUpdate]
+    );
+
+    // Sync play/pause state for mobile player
+    useEffect(() => {
+      if (Platform.OS === 'web' || !player) return;
+      try {
+        if (isPlaying) {
+          player.play();
+        } else {
+          player.pause();
         }
-      },
-      pauseAsync: async () => {
-        if (Platform.OS === 'web' && webVideoRef.current) {
-          webVideoRef.current.pause();
-        } else if (videoRef.current) {
-          await videoRef.current.pauseAsync();
+      } catch {}
+    }, [player, isPlaying]);
+
+    // Sync rate and muted state for mobile player
+    useEffect(() => {
+      if (Platform.OS === 'web' || !player) return;
+      try {
+        player.playbackRate = playbackSpeed;
+      } catch {}
+    }, [player, playbackSpeed]);
+
+    useEffect(() => {
+      if (Platform.OS === 'web' || !player) return;
+      try {
+        player.muted = isMuted;
+      } catch {}
+    }, [player, isMuted]);
+
+    // Native timeUpdate and sourceLoad event subscriptions
+    useEffect(() => {
+      if (Platform.OS === 'web' || !player) return;
+
+      const timeSub = player.addListener('timeUpdate', (event) => {
+        if (onPlaybackUpdate) {
+          onPlaybackUpdate(event.currentTime, player.duration || 1);
         }
-      },
-      setPositionAsync: async (positionMillis: number) => {
-        if (Platform.OS === 'web' && webVideoRef.current) {
-          webVideoRef.current.currentTime = positionMillis / 1000;
-        } else if (videoRef.current) {
-          await videoRef.current.setPositionAsync(positionMillis);
+      });
+
+      const loadSub = player.addListener('sourceLoad', (event) => {
+        if (onPlaybackUpdate) {
+          onPlaybackUpdate(player.currentTime, event.duration || 1);
         }
-      },
-      setRateAsync: async (rate: number) => {
-        if (Platform.OS === 'web' && webVideoRef.current) {
-          webVideoRef.current.playbackRate = rate;
-        } else if (videoRef.current) {
-          await videoRef.current.setRateAsync(rate, true);
-        }
-      },
-      getNativeVideoElement: () => {
-        return webVideoRef.current;
-      },
-    }));
+      });
+
+      return () => {
+        timeSub.remove();
+        loadSub.remove();
+      };
+    }, [player, onPlaybackUpdate]);
 
     // Web sync
     useEffect(() => {
@@ -85,15 +158,7 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
       }
     }, [isPlaying, playbackSpeed]);
 
-    const handlePlaybackStatusUpdate = (status: AVPlaybackStatus) => {
-      if (!status.isLoaded) return;
-      if (onPlaybackUpdate) {
-        const pos = (status.positionMillis || 0) / 1000;
-        const dur = (status.durationMillis || 0) / 1000;
-        onPlaybackUpdate(pos, dur);
-      }
-    };
-
+    // Web fallback for desktop browser and MediaPipe Web Vision API
     if (Platform.OS === 'web') {
       return (
         <View style={[styles.container, style, { opacity }]}>
@@ -130,19 +195,14 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
       );
     }
 
+    // Native iOS / Android VideoView using expo-video
     return (
       <View style={[styles.container, style, { opacity }]}>
-        <Video
-          ref={videoRef}
-          source={{ uri: sourceUri }}
-          rate={playbackSpeed}
-          shouldCorrectPitch={true}
-          volume={isMuted ? 0 : 1.0}
-          isMuted={isMuted}
-          resizeMode={ResizeMode.COVER}
-          shouldPlay={isPlaying}
-          isLooping={false}
-          onPlaybackStatusUpdate={handlePlaybackStatusUpdate}
+        <VideoView
+          player={player}
+          contentFit="cover"
+          nativeControls={false}
+          surfaceType={isFlipped ? 'textureView' : 'surfaceView'}
           style={[
             StyleSheet.absoluteFill,
             isFlipped ? { transform: [{ scaleX: -1 }] } : undefined,
