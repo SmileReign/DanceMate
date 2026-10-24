@@ -14,11 +14,20 @@ import { THEME } from './src/constants/theme';
 
 type AppScreen = 'home' | 'live-camera' | 'library' | 'tracking' | 'practice';
 
+interface NavState {
+  screen: AppScreen;
+  tab: MainTab;
+  project: DanceProject | null;
+}
+
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<AppScreen>('home');
   const [activeTab, setActiveTab] = useState<MainTab>('home');
   const [selectedProject, setSelectedProject] = useState<DanceProject | null>(null);
   const [projects, setProjects] = useState<DanceProject[]>([]);
+  const [navStack, setNavStack] = useState<NavState[]>([
+    { screen: 'home', tab: 'home', project: null },
+  ]);
 
   // Load project library
   useEffect(() => {
@@ -27,45 +36,63 @@ export default function App() {
     });
   }, []);
 
-  const handleSelectTab = (tab: MainTab) => {
+  const navigateTo = (screen: AppScreen, tab: MainTab, project: DanceProject | null = null) => {
+    setCurrentScreen(screen);
     setActiveTab(tab);
+    if (project !== null) setSelectedProject(project);
+    setNavStack((prev) => {
+      const last = prev[prev.length - 1];
+      if (last && last.screen === screen && last.tab === tab && last.project?.id === project?.id) {
+        return prev;
+      }
+      return [...prev, { screen, tab, project: project ?? selectedProject }];
+    });
+  };
+
+  const handleGoBack = () => {
+    setNavStack((prev) => {
+      if (prev.length > 1) {
+        const nextStack = [...prev];
+        nextStack.pop();
+        const target = nextStack[nextStack.length - 1];
+        setCurrentScreen(target.screen);
+        setActiveTab(target.tab);
+        setSelectedProject(target.project);
+        return nextStack;
+      } else {
+        if (currentScreen !== 'home') {
+          setCurrentScreen('home');
+          setActiveTab('home');
+        }
+        return [{ screen: 'home', tab: 'home', project: null }];
+      }
+    });
+  };
+
+  const handleSelectTab = (tab: MainTab) => {
     if (tab === 'home') {
-      setCurrentScreen('home');
+      navigateTo('home', 'home');
     } else if (tab === 'live-camera') {
-      setCurrentScreen('live-camera');
+      navigateTo('live-camera', 'live-camera');
     } else if (tab === 'library') {
-      setCurrentScreen('library');
+      navigateTo('library', 'library');
     }
   };
 
   const handleSelectProjectForPractice = (project: DanceProject) => {
-    setSelectedProject(project);
-    setCurrentScreen('practice');
+    navigateTo('practice', 'library', project);
   };
 
   const handleSelectProjectForTracking = (project: DanceProject) => {
-    setSelectedProject(project);
-    setCurrentScreen('tracking');
+    navigateTo('tracking', 'library', project);
   };
 
   const handleCreateNewProject = (project: DanceProject) => {
-    setSelectedProject(project);
-    setCurrentScreen('tracking');
+    navigateTo('tracking', 'library', project);
   };
 
   const handleSaveAndStartPractice = (updatedProject: DanceProject) => {
-    setSelectedProject(updatedProject);
-    setCurrentScreen('practice');
-  };
-
-  const handleBackToHome = () => {
-    setCurrentScreen('home');
-    setActiveTab('home');
-  };
-
-  const handleBackToLibrary = () => {
-    setCurrentScreen('library');
-    setActiveTab('library');
+    navigateTo('practice', 'library', updatedProject);
   };
 
   // Determine if bottom navigation should be visible
@@ -77,27 +104,22 @@ export default function App() {
       <View style={styles.container}>
         <StatusBar style="light" />
 
-        {/* Home Screen (Clean Dashboard with instant Camera Tracking launch) */}
+        {/* Home Screen (Studio Dashboard) */}
         {currentScreen === 'home' && (
           <HomeScreen
             projects={projects}
-            onOpenLiveCamera={() => {
-              setCurrentScreen('live-camera');
-              setActiveTab('live-camera');
-            }}
-            onOpenLibrary={() => {
-              setCurrentScreen('library');
-              setActiveTab('library');
-            }}
+            onOpenLiveCamera={() => navigateTo('live-camera', 'live-camera')}
+            onOpenLibrary={() => navigateTo('library', 'library')}
             onSelectProjectForPractice={handleSelectProjectForPractice}
             onSelectProjectForTracking={handleSelectProjectForTracking}
+            onBack={handleGoBack}
           />
         )}
 
         {/* Live Camera Motion Tracker (Ultra-Efficient 60 FPS Viewfinder) */}
         {currentScreen === 'live-camera' && (
           <LiveMotionTrackingScreen
-            onBackToHome={handleBackToHome}
+            onBackToHome={handleGoBack}
             projects={projects}
             onSelectProjectForPractice={handleSelectProjectForPractice}
           />
@@ -106,6 +128,7 @@ export default function App() {
         {/* Library Screen (All choreographies & video imports) */}
         {currentScreen === 'library' && (
           <HistoryScreen
+            onBackToHome={handleGoBack}
             onSelectProjectForPractice={handleSelectProjectForPractice}
             onSelectProjectForTracking={handleSelectProjectForTracking}
             onCreateNewProject={handleCreateNewProject}
@@ -117,7 +140,7 @@ export default function App() {
           <ReferenceTrackingScreen
             project={selectedProject}
             onSaveAndStartPractice={handleSaveAndStartPractice}
-            onBack={handleBackToLibrary}
+            onBack={handleGoBack}
           />
         )}
 
@@ -125,10 +148,9 @@ export default function App() {
         {currentScreen === 'practice' && selectedProject && (
           <PracticeScreen
             project={selectedProject}
-            onBackToLibrary={handleBackToLibrary}
+            onBackToLibrary={handleGoBack}
             onOpenTrackingStage={(proj) => {
-              setSelectedProject(proj);
-              setCurrentScreen('tracking');
+              navigateTo('tracking', 'library', proj);
             }}
           />
         )}

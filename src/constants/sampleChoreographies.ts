@@ -139,6 +139,51 @@ function createDanceLandmarks(time: number, style: 'kpop' | 'hiphop' | 'shuffle'
   landmarks[POSE_LANDMARKS.LEFT_FOOT_INDEX] = { x: landmarks[POSE_LANDMARKS.LEFT_ANKLE].x + 0.04, y: landmarks[POSE_LANDMARKS.LEFT_ANKLE].y + 0.02, z: 0, visibility: 0.85 };
   landmarks[POSE_LANDMARKS.RIGHT_FOOT_INDEX] = { x: landmarks[POSE_LANDMARKS.RIGHT_ANKLE].x + 0.04, y: landmarks[POSE_LANDMARKS.RIGHT_ANKLE].y + 0.02, z: 0, visibility: 0.85 };
 
+  // Elaborated Left Hand (33..53)
+  const lwx = landmarks[POSE_LANDMARKS.LEFT_WRIST].x;
+  const lwy = landmarks[POSE_LANDMARKS.LEFT_WRIST].y;
+  landmarks[33] = { x: lwx, y: lwy, z: 0, visibility: 0.95 };
+
+  const fingerSpreads = [-0.35, -0.15, 0.0, 0.15, 0.32];
+  const fingerLens = [0.03, 0.045, 0.048, 0.044, 0.036];
+  const lHandAngle = Math.atan2(lwy - landmarks[POSE_LANDMARKS.LEFT_ELBOW].y, lwx - landmarks[POSE_LANDMARKS.LEFT_ELBOW].x);
+
+  for (let f = 0; f < 5; f++) {
+    const baseIdx = 34 + f * 4;
+    const a = lHandAngle + fingerSpreads[f];
+    const fl = fingerLens[f];
+    for (let s = 1; s <= 4; s++) {
+      const d = (fl * s) / 4;
+      landmarks[baseIdx + s - 1] = {
+        x: lwx + Math.cos(a) * d,
+        y: lwy + Math.sin(a) * d,
+        z: 0,
+        visibility: 0.9,
+      };
+    }
+  }
+
+  // Elaborated Right Hand (54..74)
+  const rwx = landmarks[POSE_LANDMARKS.RIGHT_WRIST].x;
+  const rwy = landmarks[POSE_LANDMARKS.RIGHT_WRIST].y;
+  landmarks[54] = { x: rwx, y: rwy, z: 0, visibility: 0.95 };
+  const rHandAngle = Math.atan2(rwy - landmarks[POSE_LANDMARKS.RIGHT_ELBOW].y, rwx - landmarks[POSE_LANDMARKS.RIGHT_ELBOW].x);
+
+  for (let f = 0; f < 5; f++) {
+    const baseIdx = 55 + f * 4;
+    const a = rHandAngle - fingerSpreads[f];
+    const fl = fingerLens[f];
+    for (let s = 1; s <= 4; s++) {
+      const d = (fl * s) / 4;
+      landmarks[baseIdx + s - 1] = {
+        x: rwx + Math.cos(a) * d,
+        y: rwy + Math.sin(a) * d,
+        z: 0,
+        visibility: 0.9,
+      };
+    }
+  }
+
   return landmarks;
 }
 

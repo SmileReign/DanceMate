@@ -1,11 +1,12 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useEffect } from 'react';
 import { View, Text, StyleSheet, Platform, TouchableOpacity } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Landmark } from '../types/dance';
 import { PoseTracker } from '../services/poseTracker';
-import { smoothLandmarks, flipLandmarks } from '../services/motionComparison';
+import { flipLandmarks } from '../services/motionComparison';
+import { SkeletonOneEuroFilter } from '../services/oneEuroFilter';
 import { THEME } from '../constants/theme';
-import { Camera, AlertCircle } from 'lucide-react-native';
+import { Camera } from 'lucide-react-native';
 
 interface LiveCameraFeedProps {
   facing: 'front' | 'back';
@@ -26,32 +27,44 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
   const webStreamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
-  const prevLandmarksRef = useRef<Landmark[] | null>(null);
+  const oneEuroFilterRef = useRef(new SkeletonOneEuroFilter({ minCutoff: 1.5, beta: 2.8, dCutoff: 1.5 }));
 
-  // Real-time kinematics pose tracking loop
+  // Real-time kinematics pose tracking loop with One Euro Filter (zero latency & jitterless)
   useEffect(() => {
-    if (Platform.OS === 'web') return;
-
     let isRunning = true;
+
     const loop = () => {
       if (!isRunning) return;
-      const timeSec = Date.now() / 1000;
-      const raw = PoseTracker.generateEstimatedDanceFrame(timeSec);
-      let processed = facing === 'front' && isMirrored ? flipLandmarks(raw) : raw;
-      processed = smoothLandmarks(prevLandmarksRef.current, processed, 0.55);
-      prevLandmarksRef.current = processed;
-      onLandmarksDetected(processed);
+      const nowSec = performance.now() / 1000;
+
+      let raw: Landmark[] | null = null;
+      if (Platform.OS === 'web' && webVideoRef.current && webVideoRef.current.readyState >= 2) {
+        raw = PoseTracker.detectLiveFrame(webVideoRef.current, Math.round(nowSec * 1000));
+      }
+
+      if (raw) {
+        let processed = facing === 'front' && isMirrored ? flipLandmarks(raw) : raw;
+        // Smooth using One Euro Filter (dynamic cutoff solves jitter vs lag)
+        processed = oneEuroFilterRef.current.filter(processed, nowSec);
+        // Extrapolate forward by 1 display frame (16ms) to eliminate camera capture latency
+        processed = oneEuroFilterRef.current.extrapolate(processed, 0.016);
+        onLandmarksDetected(processed);
+      } else {
+        onLandmarksDetected(null);
+      }
+
       animFrameRef.current = requestAnimationFrame(loop);
     };
 
     animFrameRef.current = requestAnimationFrame(loop);
+
     return () => {
       isRunning = false;
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
   }, [facing, isMirrored, onLandmarksDetected]);
 
-  // Web camera stream
+  // Web camera stream initialization
   useEffect(() => {
     if (Platform.OS !== 'web') return;
     let isSubscribed = true;
@@ -67,6 +80,7 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
             facingMode: facing === 'front' ? 'user' : 'environment',
             width: { ideal: 640 },
             height: { ideal: 480 },
+            frameRate: { ideal: 60, min: 30 },
           },
           audio: false,
         });

@@ -125,11 +125,20 @@ export function flipLandmarks(landmarks: Landmark[]): Landmark[] {
 export function getInterpolatedPose(poseFrames: PoseFrame[], currentTimestamp: number): Landmark[] | null {
   if (!poseFrames || poseFrames.length === 0) return null;
 
+  // If outside detected bounds by more than 0.5s, no dancer visible
+  if (currentTimestamp < poseFrames[0].timestamp - 0.5) {
+    return null;
+  }
   if (currentTimestamp <= poseFrames[0].timestamp) {
     return poseFrames[0].landmarks;
   }
-  if (currentTimestamp >= poseFrames[poseFrames.length - 1].timestamp) {
-    return poseFrames[poseFrames.length - 1].landmarks;
+
+  const lastFrame = poseFrames[poseFrames.length - 1];
+  if (currentTimestamp > lastFrame.timestamp + 0.5) {
+    return null;
+  }
+  if (currentTimestamp >= lastFrame.timestamp) {
+    return lastFrame.landmarks;
   }
 
   // Binary search for closest frame pair
@@ -143,17 +152,27 @@ export function getInterpolatedPose(poseFrames: PoseFrame[], currentTimestamp: n
         const frameA = poseFrames[mid];
         const frameB = poseFrames[mid + 1];
         const span = frameB.timestamp - frameA.timestamp;
+
+        // If gap between detected frames is wide (> 0.5s), tracking was lost: do not hallucinate across the void
+        if (span > 0.5) {
+          if (currentTimestamp - frameA.timestamp < 0.15) return frameA.landmarks;
+          if (frameB.timestamp - currentTimestamp < 0.15) return frameB.landmarks;
+          return null;
+        }
+
         if (span <= 1e-4) return frameA.landmarks;
 
-        const factor = (currentTimestamp - frameA.timestamp) / span;
+        const factor = Math.max(0, Math.min(1, (currentTimestamp - frameA.timestamp) / span));
 
         return frameA.landmarks.map((lmA, idx) => {
           const lmB = frameB.landmarks[idx] || lmA;
+          const visA = lmA.visibility !== undefined ? lmA.visibility : 1;
+          const visB = lmB.visibility !== undefined ? lmB.visibility : 1;
           return {
             x: lmA.x + (lmB.x - lmA.x) * factor,
             y: lmA.y + (lmB.y - lmA.y) * factor,
             z: (lmA.z || 0) + ((lmB.z || 0) - (lmA.z || 0)) * factor,
-            visibility: Math.min(lmA.visibility || 1, lmB.visibility || 1),
+            visibility: Math.max(0.65, visA + (visB - visA) * factor),
           };
         });
       }
@@ -227,6 +246,16 @@ export function compareDancerPoses(
 
   for (const config of JOINT_ANGLE_CONFIGS) {
     const [pA, pB, pC] = config.points;
+    if (
+      !normRef[pA] ||
+      !normRef[pB] ||
+      !normRef[pC] ||
+      !normLive[pA] ||
+      !normLive[pB] ||
+      !normLive[pC]
+    ) {
+      continue;
+    }
 
     const angleRef = calculateAngle(normRef[pA], normRef[pB], normRef[pC]);
     const angleLive = calculateAngle(normLive[pA], normLive[pB], normLive[pC]);
@@ -316,3 +345,54 @@ export function compareDancerPoses(
     highlightJoints,
   };
 }
+
+/**
+ * Maps normalized video landmarks [0..1] to container coordinates with CSS object-fit: cover
+ */
+export function mapCoverLandmarks(
+  landmarks: Landmark[],
+  videoWidth: number,
+  videoHeight: number,
+  containerWidth: number,
+  containerHeight: number
+): Landmark[] {
+  if (
+    !landmarks ||
+    landmarks.length === 0 ||
+    videoWidth <= 0 ||
+    videoHeight <= 0 ||
+    containerWidth <= 0 ||
+    containerHeight <= 0
+  ) {
+    return landmarks;
+  }
+
+  const videoAspect = videoWidth / videoHeight;
+  const containerAspect = containerWidth / containerHeight;
+
+  let scaleX = 1;
+  let scaleY = 1;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  if (containerAspect < videoAspect) {
+    // Container is taller than video (e.g. portrait phone)
+    const renderedWidth = containerHeight * videoAspect;
+    const cropX = (renderedWidth - containerWidth) / 2;
+    scaleX = renderedWidth / containerWidth;
+    offsetX = -cropX / containerWidth;
+  } else {
+    // Container is wider than video (e.g. landscape desktop)
+    const renderedHeight = containerWidth / videoAspect;
+    const cropY = (renderedHeight - containerHeight) / 2;
+    scaleY = renderedHeight / containerHeight;
+    offsetY = -cropY / containerHeight;
+  }
+
+  return landmarks.map((lm) => ({
+    ...lm,
+    x: lm.x * scaleX + offsetX,
+    y: lm.y * scaleY + offsetY,
+  }));
+}
+

@@ -7,7 +7,9 @@ import {
   FlatList,
   Modal,
   TextInput,
+  Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
 import { DanceProject } from '../types/dance';
 import { StorageService } from '../services/storageService';
@@ -22,19 +24,25 @@ import {
   Layers,
   Sparkles,
   AlertTriangle,
+  ArrowLeft,
 } from 'lucide-react-native';
 
 interface HistoryScreenProps {
+  onBackToHome: () => void;
   onSelectProjectForPractice: (project: DanceProject) => void;
   onSelectProjectForTracking: (project: DanceProject) => void;
   onCreateNewProject: (project: DanceProject) => void;
 }
 
 export const HistoryScreen: React.FC<HistoryScreenProps> = ({
+  onBackToHome,
   onSelectProjectForPractice,
   onSelectProjectForTracking,
   onCreateNewProject,
 }) => {
+  const insets = useSafeAreaInsets();
+  const headerTopPadding = Math.max(insets.top + 28, Platform.OS === 'android' ? 52 : 40);
+
   const [projects, setProjects] = useState<DanceProject[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -157,13 +165,25 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({
   return (
     <View style={styles.container}>
       {/* Header */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>DanceMate</Text>
-          <Text style={styles.headerSubtitle}>Choreography Library & Tracking History</Text>
+      <View style={[styles.header, { paddingTop: headerTopPadding }]}>
+        <View style={styles.headerLeftGroup}>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={onBackToHome}
+            activeOpacity={0.8}
+            accessibilityLabel="Go back to Home"
+          >
+            <ArrowLeft size={18} color="#FFFFFF" />
+            <Text style={styles.backBtnText}>Back</Text>
+          </TouchableOpacity>
+
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.headerTitle}>DanceMate</Text>
+            <Text style={styles.headerSubtitle}>Choreography Library & Tracking History</Text>
+          </View>
         </View>
 
-        <TouchableOpacity style={styles.importBtn} onPress={handleImportVideo}>
+        <TouchableOpacity style={styles.importBtn} onPress={handleImportVideo} activeOpacity={0.8}>
           <Plus size={16} color="#000" />
           <Text style={styles.importBtnText}>Import Video</Text>
         </TouchableOpacity>
@@ -292,7 +312,18 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({
       <Modal visible={editingProject !== null} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Rename Choreography</Text>
+            <View style={styles.modalHeaderRow}>
+              <TouchableOpacity
+                style={styles.modalBackBtn}
+                onPress={() => setEditingProject(null)}
+                activeOpacity={0.8}
+              >
+                <ArrowLeft size={16} color="#FFFFFF" />
+                <Text style={styles.modalBackBtnText}>Back</Text>
+              </TouchableOpacity>
+              <Text style={styles.modalTitle}>Rename Choreography</Text>
+              <View style={{ width: 60 }} />
+            </View>
             <TextInput
               style={styles.modalInput}
               value={renameTitle}
@@ -322,7 +353,18 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({
       <Modal visible={deletingProject !== null} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Delete Project?</Text>
+            <View style={styles.modalHeaderRow}>
+              <TouchableOpacity
+                style={styles.modalBackBtn}
+                onPress={() => setDeletingProject(null)}
+                activeOpacity={0.8}
+              >
+                <ArrowLeft size={16} color="#FFFFFF" />
+                <Text style={styles.modalBackBtnText}>Back</Text>
+              </TouchableOpacity>
+              <Text style={styles.modalTitle}>Delete Project?</Text>
+              <View style={{ width: 60 }} />
+            </View>
             <Text style={styles.modalSub}>
               Are you sure you want to delete &quot;{deletingProject?.title}&quot;? This will remove all saved pose tracking data and section drills.
             </Text>
@@ -348,9 +390,20 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({
       <Modal visible={missingVideoWarning !== null} transparent animationType="fade">
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <View style={styles.warnHeader}>
-              <AlertTriangle size={24} color={THEME.colors.matchFair} />
-              <Text style={styles.modalTitle}>Video File Unavailable</Text>
+            <View style={styles.modalHeaderRow}>
+              <TouchableOpacity
+                style={styles.modalBackBtn}
+                onPress={() => setMissingVideoWarning(null)}
+                activeOpacity={0.8}
+              >
+                <ArrowLeft size={16} color="#FFFFFF" />
+                <Text style={styles.modalBackBtnText}>Back</Text>
+              </TouchableOpacity>
+              <View style={styles.warnHeader}>
+                <AlertTriangle size={18} color={THEME.colors.matchFair} />
+                <Text style={styles.modalTitle}>Unavailable</Text>
+              </View>
+              <View style={{ width: 60 }} />
             </View>
             <Text style={styles.modalSub}>{missingVideoWarning}</Text>
             <View style={styles.modalActions}>
@@ -374,7 +427,7 @@ const styles = StyleSheet.create({
     backgroundColor: THEME.colors.background,
   },
   header: {
-    height: 64,
+    paddingBottom: 14,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -382,6 +435,32 @@ const styles = StyleSheet.create({
     backgroundColor: THEME.colors.backgroundElevated,
     borderBottomWidth: 1,
     borderBottomColor: THEME.colors.border,
+    gap: 12,
+  },
+  headerLeftGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  backBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  backBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  headerTitleWrap: {
+    flex: 1,
   },
   headerTitle: {
     fontSize: 20,
@@ -392,6 +471,29 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: THEME.colors.textSecondary,
     fontWeight: '500',
+  },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginBottom: 16,
+  },
+  modalBackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    gap: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  modalBackBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
   importBtn: {
     flexDirection: 'row',
@@ -409,6 +511,7 @@ const styles = StyleSheet.create({
   },
   listContainer: {
     padding: THEME.spacing.md,
+    paddingBottom: 120,
   },
   sectionHeader: {
     flexDirection: 'row',

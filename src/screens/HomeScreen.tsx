@@ -8,20 +8,20 @@ import {
   SafeAreaView,
   Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DanceProject } from '../types/dance';
 import { THEME } from '../constants/theme';
 import {
-  Camera,
+  Sparkles,
   Play,
   Film,
-  Sparkles,
+  Camera,
+  Flame,
   Zap,
   Activity,
-  Flame,
   ChevronRight,
-  Layers,
   CheckCircle2,
-  Compass,
+  ArrowLeft,
 } from 'lucide-react-native';
 
 interface HomeScreenProps {
@@ -30,6 +30,7 @@ interface HomeScreenProps {
   onOpenLibrary: () => void;
   onSelectProjectForPractice: (project: DanceProject) => void;
   onSelectProjectForTracking: (project: DanceProject) => void;
+  onBack?: () => void;
 }
 
 export const HomeScreen: React.FC<HomeScreenProps> = ({
@@ -38,17 +39,31 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onOpenLibrary,
   onSelectProjectForPractice,
   onSelectProjectForTracking,
+  onBack,
 }) => {
+  const insets = useSafeAreaInsets();
+  const safeTop = Math.max(insets.top + 28, Platform.OS === 'android' ? 56 : 42);
+
   return (
     <SafeAreaView style={styles.safeContainer}>
       <ScrollView
         style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, { paddingTop: safeTop }]}
         showsVerticalScrollIndicator={false}
       >
-        {/* 1. App Header */}
+        {/* 1. App Header with Back Button */}
         <View style={styles.headerRow}>
-          <View>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={onBack}
+            activeOpacity={0.8}
+            accessibilityLabel="Go back"
+          >
+            <ArrowLeft size={18} color="#FFFFFF" />
+            <Text style={styles.backBtnText}>Back</Text>
+          </TouchableOpacity>
+
+          <View style={styles.headerRightInfo}>
             <View style={styles.brandTitleRow}>
               <Text style={styles.brandTitle}>DanceMate</Text>
               <View style={styles.onlineBadge}>
@@ -111,7 +126,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </View>
           </TouchableOpacity>
 
-          {/* Mode 2: Choreography Matching */}
+          {/* Mode 2: Practice Studio */}
           <TouchableOpacity
             style={styles.quickCard}
             onPress={() => {
@@ -123,13 +138,13 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             }}
             activeOpacity={0.8}
           >
-            <View style={[styles.quickCardIconCircle, { backgroundColor: 'rgba(255, 112, 166, 0.15)' }]}>
-              <Play size={20} color="#FF70A6" />
+            <View style={[styles.quickCardIconCircle, { backgroundColor: 'rgba(0, 245, 212, 0.15)' }]}>
+              <Sparkles size={20} color="#00F5D4" />
             </View>
-            <Text style={styles.quickCardTitle}>Match Dance</Text>
-            <Text style={styles.quickCardDesc}>Ghost overlay & side-by-side video comparison</Text>
+            <Text style={styles.quickCardTitle}>Practice Stage</Text>
+            <Text style={styles.quickCardDesc}>Ghost skeleton overlay & angular joint scoring</Text>
             <View style={styles.quickCardArrow}>
-              <ChevronRight size={16} color="#FF70A6" />
+              <ChevronRight size={16} color="#00F5D4" />
             </View>
           </TouchableOpacity>
         </View>
@@ -141,7 +156,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               <CheckCircle2 size={16} color="#00F5D4" />
               <View>
                 <Text style={styles.engineItemTitle}>Latency</Text>
-                <Text style={styles.engineItemValue}>&lt; 10ms Realtime</Text>
+                <Text style={styles.engineItemValue}>Zero Lag 1€ Filter</Text>
               </View>
             </View>
 
@@ -160,7 +175,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             <View style={styles.engineItem}>
               <Activity size={16} color="#F59E0B" />
               <View>
-                <Text style={styles.engineItemTitle}>Pose Points</Text>
+                <Text style={styles.engineItemTitle}>Articulated Joints</Text>
                 <Text style={styles.engineItemValue}>33 Full Body</Text>
               </View>
             </View>
@@ -222,13 +237,34 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: 16,
     paddingTop: Platform.OS === 'android' ? 36 : 12,
-    paddingBottom: 24,
+    paddingBottom: 110,
   },
   headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 20,
+    gap: 12,
+  },
+  backBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+  },
+  backBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  headerRightInfo: {
+    alignItems: 'flex-end',
+    flex: 1,
   },
   brandTitleRow: {
     flexDirection: 'row',

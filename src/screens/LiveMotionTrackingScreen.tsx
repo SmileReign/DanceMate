@@ -11,7 +11,8 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Landmark, DanceProject } from '../types/dance';
 import { PoseTracker } from '../services/poseTracker';
-import { smoothLandmarks, flipLandmarks } from '../services/motionComparison';
+import { flipLandmarks, mapCoverLandmarks } from '../services/motionComparison';
+import { SkeletonOneEuroFilter } from '../services/oneEuroFilter';
 import { MotionMetricsEngine, MotionMetrics } from '../services/motionMetrics';
 import { SkeletonOverlay } from '../components/SkeletonOverlay';
 import { THEME } from '../constants/theme';
@@ -69,6 +70,9 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
 
   // Performance refs
   const prevLandmarksRef = useRef<Landmark[] | null>(null);
+  const oneEuroFilterRef = useRef(
+    new SkeletonOneEuroFilter({ minCutoff: 1.5, beta: 2.8, dCutoff: 1.5 })
+  );
   const metricsEngineRef = useRef(new MotionMetricsEngine());
   const animFrameRef = useRef<number | null>(null);
   const webVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -95,29 +99,51 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
     const trackingLoop = () => {
       if (!isRunning) return;
 
-      const timeSec = (Date.now() / 1000) * (targetBpm / 120);
-      let rawLandmarks: Landmark[];
+      const nowMs = performance.now();
+      const nowSec = nowMs / 1000;
+      let rawLandmarks: Landmark[] | null = null;
 
-      if (danceStyle === 'kpop') {
-        rawLandmarks = PoseTracker.generateEstimatedDanceFrame(timeSec * 1.3);
-      } else if (danceStyle === 'shuffle') {
-        rawLandmarks = PoseTracker.generateEstimatedDanceFrame(timeSec * 1.5);
-      } else if (danceStyle === 'wave') {
-        rawLandmarks = PoseTracker.generateEstimatedDanceFrame(timeSec * 0.85);
-      } else {
-        rawLandmarks = PoseTracker.generateEstimatedDanceFrame(timeSec);
+      if (
+        Platform.OS === 'web' &&
+        webVideoRef.current &&
+        webVideoRef.current.readyState >= 2 &&
+        webVideoRef.current.videoWidth > 0
+      ) {
+        rawLandmarks = PoseTracker.detectLiveFrame(webVideoRef.current, Math.round(nowMs));
       }
 
-      let processed = facing === 'front' && isMirrored ? flipLandmarks(rawLandmarks) : rawLandmarks;
-      processed = smoothLandmarks(prevLandmarksRef.current, processed, 0.55);
-      prevLandmarksRef.current = processed;
+      if (rawLandmarks && rawLandmarks.length >= 33) {
+        const vWidth = (webVideoRef.current && webVideoRef.current.videoWidth) || SCREEN_WIDTH;
+        const vHeight = (webVideoRef.current && webVideoRef.current.videoHeight) || SCREEN_HEIGHT;
 
-      setLandmarks(processed);
+        // 1. Project landmarks from video aspect ratio to screen with object-fit: cover
+        let mapped = mapCoverLandmarks(rawLandmarks, vWidth, vHeight, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-      // Compute kinetic metrics
-      const computed = metricsEngineRef.current.compute(processed, Date.now());
-      computed.cadenceBpm = targetBpm;
-      setMetrics(computed);
+        // 2. Anatomical mirroring for front camera selfie feed
+        if (facing === 'front' && isMirrored) {
+          mapped = flipLandmarks(mapped);
+        }
+
+        // 3. One Euro Filter: Dynamic noise cutoff eliminates webcam jitter while preserving zero-lag response
+        let processed = oneEuroFilterRef.current.filter(mapped, nowSec);
+        // Extrapolate forward 16ms to eliminate camera capture latency
+        processed = oneEuroFilterRef.current.extrapolate(processed, 0.016);
+        prevLandmarksRef.current = processed;
+
+        setLandmarks(processed);
+
+        // 4. Compute real-time kinetic dance metrics from genuine live body movements
+        const computed = metricsEngineRef.current.compute(processed, Date.now());
+        setMetrics(computed);
+      } else {
+        // No body detected in camera frame - DO NOT fabricate fake synthetic poses
+        setLandmarks(null);
+        setMetrics((prev) => ({
+          ...prev,
+          energy: Math.max(0, prev.energy - 6),
+          isBodyFramed: false,
+        }));
+      }
 
       animFrameRef.current = requestAnimationFrame(trackingLoop);
     };
@@ -128,7 +154,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
       isRunning = false;
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
-  }, [facing, isMirrored, danceStyle, targetBpm]);
+  }, [facing, isMirrored]);
 
   // Web camera initialization
   useEffect(() => {
@@ -180,7 +206,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
   };
 
   const handleCycleSkeleton = () => {
-    const styles: Array<'cyan' | 'magenta' | 'minimal' | 'hidden'> = [
+    const styles: ('cyan' | 'magenta' | 'minimal' | 'hidden')[] = [
       'cyan',
       'magenta',
       'minimal',
@@ -287,6 +313,19 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
             <View style={styles.cornerTR} />
             <View style={styles.cornerBL} />
             <View style={styles.cornerBR} />
+
+            {/* Real-time Status Badge inside framing box */}
+            <View style={styles.framingStatusPill}>
+              <View
+                style={[
+                  styles.framingStatusDot,
+                  landmarks ? styles.dotTracking : styles.dotSearching,
+                ]}
+              />
+              <Text style={styles.framingStatusText}>
+                {landmarks ? '33 Joints Locked • Live Tracking' : 'Step back to frame full body'}
+              </Text>
+            </View>
           </View>
         </View>
       )}
@@ -318,8 +357,15 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
 
           {/* Camera Active Badge */}
           <View style={styles.badgeRow}>
-            <View style={styles.liveIndicatorDot} />
-            <Text style={styles.liveBadgeText}>LIVE CAMERA ACTIVE</Text>
+            <View
+              style={[
+                styles.liveIndicatorDot,
+                !landmarks && { backgroundColor: '#F59E0B' },
+              ]}
+            />
+            <Text style={styles.liveBadgeText}>
+              {landmarks ? 'LIVE AI TRACKING' : 'SEARCHING FOR DANCER'}
+            </Text>
             <View style={styles.badgeDivider} />
             <Text style={styles.fpsBadgeText}>60 FPS</Text>
           </View>
@@ -469,7 +515,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
           >
             <Play size={16} color="#000000" fill="#000000" />
             <Text style={styles.quickPracticeBtnText}>
-              Practice with "{projects[0].title}"
+              {`Practice with "${projects[0].title}"`}
             </Text>
           </TouchableOpacity>
         )}
@@ -623,7 +669,7 @@ const styles = StyleSheet.create({
     marginTop: 1,
   },
   framingGuideContainer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 32,
@@ -642,6 +688,37 @@ const styles = StyleSheet.create({
   },
   framingBoxCalibrating: {
     borderColor: 'rgba(245, 158, 11, 0.4)',
+  },
+  framingStatusPill: {
+    position: 'absolute',
+    top: 16,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(15, 23, 42, 0.75)',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  framingStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  dotTracking: {
+    backgroundColor: '#00F5D4',
+  },
+  dotSearching: {
+    backgroundColor: '#F59E0B',
+  },
+  framingStatusText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    letterSpacing: 0.3,
   },
   cornerTL: {
     position: 'absolute',

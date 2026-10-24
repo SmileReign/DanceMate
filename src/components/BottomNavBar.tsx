@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Platform } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Home, Camera, Film } from 'lucide-react-native';
 import { THEME } from '../constants/theme';
 
@@ -11,13 +12,16 @@ interface BottomNavBarProps {
 }
 
 export const BottomNavBar: React.FC<BottomNavBarProps> = ({ activeTab, onSelectTab }) => {
+  const insets = useSafeAreaInsets();
+  const safeBottom = Math.max(insets.bottom + 12, Platform.OS === 'android' ? 48 : 24);
+
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingBottom: safeBottom }]}>
       {/* Home Tab */}
       <TouchableOpacity
-        style={styles.tabItem}
+        style={[styles.tabItem, activeTab === 'home' && styles.tabItemActive]}
         onPress={() => onSelectTab('home')}
-        activeOpacity={0.7}
+        activeOpacity={0.75}
       >
         <Home
           size={22}
@@ -59,9 +63,9 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({ activeTab, onSelectT
 
       {/* Library Tab */}
       <TouchableOpacity
-        style={styles.tabItem}
+        style={[styles.tabItem, activeTab === 'library' && styles.tabItemActive]}
         onPress={() => onSelectTab('library')}
-        activeOpacity={0.7}
+        activeOpacity={0.75}
       >
         <Film
           size={22}
@@ -73,7 +77,7 @@ export const BottomNavBar: React.FC<BottomNavBarProps> = ({ activeTab, onSelectT
             { color: activeTab === 'library' ? THEME.colors.skeletonReference : THEME.colors.textMuted },
           ]}
         >
-          Library
+          Dance Library
         </Text>
       </TouchableOpacity>
     </View>
@@ -88,30 +92,34 @@ const styles = StyleSheet.create({
     backgroundColor: '#0E131E',
     borderTopWidth: 1,
     borderTopColor: '#1F293D',
-    paddingVertical: 8,
-    paddingBottom: Platform.OS === 'ios' ? 24 : 12,
+    paddingTop: 10,
+    paddingHorizontal: 24,
   },
   tabItem: {
     alignItems: 'center',
     justifyContent: 'center',
     flex: 1,
-    paddingVertical: 4,
+    paddingVertical: 8,
+    borderRadius: 12,
+  },
+  tabItemActive: {
+    backgroundColor: 'rgba(0, 245, 212, 0.06)',
   },
   tabLabel: {
     fontSize: 11,
-    fontWeight: '600',
+    fontWeight: '700',
     marginTop: 4,
   },
   centerCameraBtn: {
     alignItems: 'center',
     justifyContent: 'center',
     flex: 1,
-    marginTop: -20,
+    marginTop: -22,
   },
   centerCameraCircle: {
-    width: 54,
-    height: 54,
-    borderRadius: 27,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     backgroundColor: THEME.colors.skeletonReference,
     alignItems: 'center',
     justifyContent: 'center',

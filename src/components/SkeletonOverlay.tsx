@@ -1,6 +1,6 @@
 import React from 'react';
-import { View, StyleSheet } from 'react-native';
-import Svg, { Line, Circle } from 'react-native-svg';
+import { View, StyleSheet, TouchableOpacity } from 'react-native';
+import Svg, { Path, Circle } from 'react-native-svg';
 import { Landmark } from '../types/dance';
 import { SKELETON_CONNECTIONS, POSE_LANDMARKS } from '../constants/skeletonJoints';
 import { THEME } from '../constants/theme';
@@ -16,6 +16,7 @@ interface SkeletonOverlayProps {
   offsetX?: number;
   offsetY?: number;
   isReference?: boolean;
+  forceSolidBones?: boolean;
   highlightJoints?: number[];
   strokeWidth?: number;
   selectedLandmarkIndex?: number | null;
@@ -33,6 +34,7 @@ export const SkeletonOverlay = React.memo<SkeletonOverlayProps>(({
   offsetX = 0,
   offsetY = 0,
   isReference = false,
+  forceSolidBones = false,
   highlightJoints = [],
   strokeWidth = 3,
   selectedLandmarkIndex = null,
@@ -42,15 +44,15 @@ export const SkeletonOverlay = React.memo<SkeletonOverlayProps>(({
     return null;
   }
 
-  // Pre-calculate transform points for efficiency
+  // Pre-calculate transform points for maximum performance
   const centerX = width / 2;
   const centerY = height / 2;
 
-  const pts = new Array(landmarks.length);
-  for (let i = 0; i < landmarks.length; i++) {
+  const pts = new Array(33);
+  for (let i = 0; i < 33; i++) {
     const lm = landmarks[i];
     if (!lm) {
-      pts[i] = { x: centerX, y: centerY };
+      pts[i] = { x: centerX, y: centerY, vis: 0 };
       continue;
     }
     const rawX = lm.x * width;
@@ -58,88 +60,159 @@ export const SkeletonOverlay = React.memo<SkeletonOverlayProps>(({
     pts[i] = {
       x: centerX + (rawX - centerX) * scale + offsetX,
       y: centerY + (rawY - centerY) * scale + offsetY,
+      vis: lm.visibility !== undefined ? lm.visibility : 1,
     };
   }
 
+  // Batch bones into unified path strings to maximize SVG rendering performance
+  let bodyBonesD = '';
+  let lowConfBonesD = '';
+  let highlightBonesD = '';
+
+  for (let i = 0; i < SKELETON_CONNECTIONS.length; i++) {
+    const [idxA, idxB] = SKELETON_CONNECTIONS[i];
+    if (idxA >= 33 || idxB >= 33) continue;
+
+    const ptA = pts[idxA];
+    const ptB = pts[idxB];
+    // Threshold out missing or unreliable points below 0.20 visibility
+    if (!ptA || !ptB || ptA.vis < 0.20 || ptB.vis < 0.20) continue;
+
+    const isHighlighted = highlightJoints.includes(idxA) || highlightJoints.includes(idxB);
+    const segment = `M ${ptA.x.toFixed(1)} ${ptA.y.toFixed(1)} L ${ptB.x.toFixed(1)} ${ptB.y.toFixed(1)} `;
+
+    if (isHighlighted) {
+      highlightBonesD += segment;
+    } else if (!forceSolidBones && (ptA.vis < 0.45 || ptB.vis < 0.45)) {
+      // Partial occlusion or lower confidence limb connection
+      lowConfBonesD += segment;
+    } else {
+      bodyBonesD += segment;
+    }
+  }
+
+  // Collect key visible body joints (33 body landmarks)
+  const renderJoints: { idx: number; x: number; y: number; r: number; color: string; opacity: number }[] = [];
+  for (let idx = 0; idx < 33; idx++) {
+    const pt = pts[idx];
+    if (!pt || pt.vis < 0.20) continue;
+
+    const isMajorBodyJoint =
+      idx === POSE_LANDMARKS.NOSE ||
+      idx === POSE_LANDMARKS.LEFT_SHOULDER ||
+      idx === POSE_LANDMARKS.RIGHT_SHOULDER ||
+      idx === POSE_LANDMARKS.LEFT_ELBOW ||
+      idx === POSE_LANDMARKS.RIGHT_ELBOW ||
+      idx === POSE_LANDMARKS.LEFT_WRIST ||
+      idx === POSE_LANDMARKS.RIGHT_WRIST ||
+      idx === POSE_LANDMARKS.LEFT_HIP ||
+      idx === POSE_LANDMARKS.RIGHT_HIP ||
+      idx === POSE_LANDMARKS.LEFT_KNEE ||
+      idx === POSE_LANDMARKS.RIGHT_KNEE ||
+      idx === POSE_LANDMARKS.LEFT_ANKLE ||
+      idx === POSE_LANDMARKS.RIGHT_ANKLE;
+
+    const isFootOrHandTip =
+      idx === POSE_LANDMARKS.LEFT_HEEL ||
+      idx === POSE_LANDMARKS.RIGHT_HEEL ||
+      idx === POSE_LANDMARKS.LEFT_FOOT_INDEX ||
+      idx === POSE_LANDMARKS.RIGHT_FOOT_INDEX ||
+      idx === POSE_LANDMARKS.LEFT_INDEX ||
+      idx === POSE_LANDMARKS.RIGHT_INDEX;
+
+    const isSelected = selectedLandmarkIndex === idx;
+    const isHighlighted = highlightJoints.includes(idx);
+    const currentJointColor = isSelected
+      ? '#FFDD00'
+      : isHighlighted
+      ? THEME.colors.matchPoor
+      : isMajorBodyJoint
+      ? jointColor
+      : isFootOrHandTip
+      ? '#00F5D4'
+      : 'rgba(255, 255, 255, 0.85)';
+
+    const radius = isSelected
+      ? 8
+      : isHighlighted
+      ? 6.5
+      : isMajorBodyJoint
+      ? (pt.vis >= 0.5 ? 5.5 : 4.5)
+      : 4;
+
+    const jointOpacity = pt.vis < 0.45 ? 0.75 : 1.0;
+
+    renderJoints.push({ idx, x: pt.x, y: pt.y, r: radius, color: currentJointColor, opacity: jointOpacity });
+  }
+
   return (
-    <View style={[StyleSheet.absoluteFill, { pointerEvents: onLandmarkPress ? 'auto' : 'none' }]}>
-      <Svg width={width} height={height} style={{ opacity }}>
-        {/* Draw Bones (Connecting Lines) */}
-        {SKELETON_CONNECTIONS.map(([idxA, idxB], i) => {
-          const ptA = pts[idxA];
-          const ptB = pts[idxB];
-          const lmA = landmarks[idxA];
-          const lmB = landmarks[idxB];
+    <View style={[StyleSheet.absoluteFill, { pointerEvents: onLandmarkPress ? 'box-none' : 'none' }]}>
+      <Svg width={width} height={height} style={{ opacity }} pointerEvents="none">
+        {/* Solid High-Confidence Body Bones */}
+        {bodyBonesD.length > 0 && (
+          <Path
+            d={bodyBonesD}
+            stroke={color}
+            strokeWidth={strokeWidth}
+            strokeLinecap="round"
+            strokeDasharray={isReference && !forceSolidBones ? '6, 3' : undefined}
+          />
+        )}
 
-          const visA = lmA?.visibility !== undefined ? lmA.visibility : 1;
-          const visB = lmB?.visibility !== undefined ? lmB.visibility : 1;
-          if (visA < 0.3 || visB < 0.3) return null;
+        {/* Low-Confidence / Partially Occluded Bones (Dashed subtle guide) */}
+        {lowConfBonesD.length > 0 && (
+          <Path
+            d={lowConfBonesD}
+            stroke={color}
+            strokeWidth={strokeWidth * 0.8}
+            strokeLinecap="round"
+            strokeDasharray="3, 3"
+            opacity={0.45}
+          />
+        )}
 
-          const isHighlighted = highlightJoints.includes(idxA) || highlightJoints.includes(idxB);
-          const boneColor = isHighlighted ? THEME.colors.matchPoor : color;
+        {/* Highlight / Deviating Bones */}
+        {highlightBonesD.length > 0 && (
+          <Path
+            d={highlightBonesD}
+            stroke={THEME.colors.matchPoor}
+            strokeWidth={strokeWidth + 1.5}
+            strokeLinecap="round"
+          />
+        )}
 
-          return (
-            <Line
-              key={`bone-${i}`}
-              x1={ptA.x}
-              y1={ptA.y}
-              x2={ptB.x}
-              y2={ptB.y}
-              stroke={boneColor}
-              strokeWidth={isHighlighted ? strokeWidth + 1.5 : strokeWidth}
-              strokeLinecap="round"
-              strokeDasharray={isReference ? '6, 3' : undefined}
-            />
-          );
-        })}
-
-        {/* Draw Major Joints */}
-        {pts.map((pt, idx) => {
-          const lm = landmarks[idx];
-          const vis = lm?.visibility !== undefined ? lm.visibility : 1;
-          if (vis < 0.3) return null;
-
-          const isMajorJoint =
-            idx === POSE_LANDMARKS.NOSE ||
-            idx === POSE_LANDMARKS.LEFT_SHOULDER ||
-            idx === POSE_LANDMARKS.RIGHT_SHOULDER ||
-            idx === POSE_LANDMARKS.LEFT_ELBOW ||
-            idx === POSE_LANDMARKS.RIGHT_ELBOW ||
-            idx === POSE_LANDMARKS.LEFT_WRIST ||
-            idx === POSE_LANDMARKS.RIGHT_WRIST ||
-            idx === POSE_LANDMARKS.LEFT_HIP ||
-            idx === POSE_LANDMARKS.RIGHT_HIP ||
-            idx === POSE_LANDMARKS.LEFT_KNEE ||
-            idx === POSE_LANDMARKS.RIGHT_KNEE ||
-            idx === POSE_LANDMARKS.LEFT_ANKLE ||
-            idx === POSE_LANDMARKS.RIGHT_ANKLE;
-
-          if (!isMajorJoint) return null;
-
-          const isSelected = selectedLandmarkIndex === idx;
-          const isHighlighted = highlightJoints.includes(idx);
-          const currentJointColor = isSelected
-            ? '#FFDD00'
-            : isHighlighted
-            ? THEME.colors.matchPoor
-            : jointColor;
-
-          const radius = isSelected ? 8 : isHighlighted ? 6.5 : isMajorJoint ? 5 : 3.5;
-
-          return (
-            <Circle
-              key={`joint-${idx}`}
-              cx={pt.x}
-              cy={pt.y}
-              r={radius}
-              fill={currentJointColor}
-              stroke="#000000"
-              strokeWidth={1.5}
-              onPress={() => onLandmarkPress && onLandmarkPress(idx)}
-            />
-          );
-        })}
+        {/* Body Joints */}
+        {renderJoints.map((j) => (
+          <Circle
+            key={`joint-${j.idx}`}
+            cx={j.x}
+            cy={j.y}
+            r={j.r}
+            fill={j.color}
+            stroke="#000000"
+            strokeWidth={1.5}
+            opacity={j.opacity}
+          />
+        ))}
       </Svg>
+
+      {/* Native touch targets (prevents SvgTouchableMixin crash on Android/Fabric) */}
+      {onLandmarkPress &&
+        renderJoints.map((j) => (
+          <TouchableOpacity
+            key={`touch-joint-${j.idx}`}
+            style={{
+              position: 'absolute',
+              left: j.x - 14,
+              top: j.y - 14,
+              width: 28,
+              height: 28,
+              borderRadius: 14,
+            }}
+            activeOpacity={0.7}
+            onPress={() => onLandmarkPress(j.idx)}
+          />
+        ))}
     </View>
   );
 });

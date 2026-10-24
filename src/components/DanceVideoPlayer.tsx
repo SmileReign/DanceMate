@@ -8,6 +8,9 @@ export interface DanceVideoPlayerRef {
   setPositionAsync: (positionMillis: number) => Promise<void>;
   setRateAsync: (rate: number) => Promise<void>;
   getNativeVideoElement: () => HTMLVideoElement | null;
+  waitForReadyAsync: (timeoutMs?: number) => Promise<boolean>;
+  getVideoDuration: () => number;
+  getVideoDimensions: () => { width: number; height: number };
 }
 
 interface DanceVideoPlayerProps {
@@ -15,9 +18,11 @@ interface DanceVideoPlayerProps {
   isPlaying: boolean;
   playbackSpeed: number;
   isFlipped: boolean;
+  fitMode?: 'cover' | 'contain';
   opacity?: number;
   isMuted?: boolean;
   onPlaybackUpdate?: (positionSeconds: number, durationSeconds: number) => void;
+  onDimensionsChange?: (width: number, height: number) => void;
   style?: any;
 }
 
@@ -28,9 +33,11 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
       isPlaying,
       playbackSpeed,
       isFlipped,
+      fitMode = 'contain',
       opacity = 1.0,
       isMuted = false,
       onPlaybackUpdate,
+      onDimensionsChange,
       style,
     },
     ref
@@ -70,9 +77,27 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
           }
         },
         setPositionAsync: async (positionMillis: number) => {
-          const targetSeconds = positionMillis / 1000;
+          const targetSeconds = Math.max(0, positionMillis / 1000);
           if (Platform.OS === 'web' && webVideoRef.current) {
-            webVideoRef.current.currentTime = targetSeconds;
+            const v = webVideoRef.current;
+            if (Math.abs(v.currentTime - targetSeconds) < 0.05 && !v.seeking) {
+              if (onPlaybackUpdate) onPlaybackUpdate(targetSeconds, v.duration || 1);
+              return;
+            }
+            await new Promise<void>((resolve) => {
+              let resolved = false;
+              const onSeeked = () => {
+                if (resolved) return;
+                resolved = true;
+                v.removeEventListener('seeked', onSeeked);
+                clearTimeout(t);
+                resolve();
+              };
+              const t = setTimeout(onSeeked, 400);
+              v.addEventListener('seeked', onSeeked);
+              v.currentTime = targetSeconds;
+            });
+            if (onPlaybackUpdate) onPlaybackUpdate(targetSeconds, v.duration || 1);
           } else if (player) {
             try {
               player.currentTime = targetSeconds;
@@ -93,6 +118,48 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
         },
         getNativeVideoElement: () => {
           return webVideoRef.current;
+        },
+        waitForReadyAsync: async (timeoutMs: number = 6000): Promise<boolean> => {
+          if (Platform.OS === 'web' && webVideoRef.current) {
+            const v = webVideoRef.current;
+            if (v.readyState >= 2 && v.videoWidth > 0) return true;
+            return new Promise<boolean>((resolve) => {
+              let resolved = false;
+              const finish = (ok: boolean) => {
+                if (resolved) return;
+                resolved = true;
+                v.removeEventListener('loadeddata', onReady);
+                v.removeEventListener('canplay', onReady);
+                v.removeEventListener('error', onError);
+                clearTimeout(timer);
+                resolve(ok);
+              };
+              const onReady = () => finish(true);
+              const onError = () => finish(false);
+              v.addEventListener('loadeddata', onReady);
+              v.addEventListener('canplay', onReady);
+              v.addEventListener('error', onError);
+              const timer = setTimeout(() => {
+                finish(v.readyState >= 1);
+              }, timeoutMs);
+            });
+          }
+          return true;
+        },
+        getVideoDuration: () => {
+          if (Platform.OS === 'web' && webVideoRef.current) {
+            return webVideoRef.current.duration || 0;
+          }
+          return player?.duration || 0;
+        },
+        getVideoDimensions: () => {
+          if (Platform.OS === 'web' && webVideoRef.current) {
+            return {
+              width: webVideoRef.current.videoWidth || 0,
+              height: webVideoRef.current.videoHeight || 0,
+            };
+          }
+          return { width: 0, height: 0 };
         },
       }),
       [player, onPlaybackUpdate]
@@ -165,13 +232,25 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
           <video
             ref={webVideoRef as any}
             src={sourceUri}
-            crossOrigin="anonymous"
+            crossOrigin={
+              sourceUri && (sourceUri.startsWith('http://') || sourceUri.startsWith('https://'))
+                ? 'anonymous'
+                : undefined
+            }
             playsInline
             muted={isMuted}
+            preload="auto"
+            onError={() => {
+              if (webVideoRef.current && webVideoRef.current.crossOrigin) {
+                console.warn('Retrying video load without crossOrigin attribute');
+                webVideoRef.current.removeAttribute('crossOrigin');
+                webVideoRef.current.load();
+              }
+            }}
             style={{
               width: '100%',
               height: '100%',
-              objectFit: 'cover',
+              objectFit: fitMode,
               transform: isFlipped ? 'scaleX(-1)' : 'none',
             }}
             onTimeUpdate={() => {
@@ -182,12 +261,36 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
                 );
               }
             }}
-            onLoadedMetadata={() => {
-              if (webVideoRef.current && onPlaybackUpdate) {
-                onPlaybackUpdate(
-                  webVideoRef.current.currentTime,
-                  webVideoRef.current.duration || 1
+            onLoadedData={() => {
+              if (webVideoRef.current && onDimensionsChange && webVideoRef.current.videoWidth > 0) {
+                onDimensionsChange(
+                  webVideoRef.current.videoWidth,
+                  webVideoRef.current.videoHeight
                 );
+              }
+            }}
+            onCanPlay={() => {
+              if (webVideoRef.current && onDimensionsChange && webVideoRef.current.videoWidth > 0) {
+                onDimensionsChange(
+                  webVideoRef.current.videoWidth,
+                  webVideoRef.current.videoHeight
+                );
+              }
+            }}
+            onLoadedMetadata={() => {
+              if (webVideoRef.current) {
+                if (onPlaybackUpdate) {
+                  onPlaybackUpdate(
+                    webVideoRef.current.currentTime,
+                    webVideoRef.current.duration || 1
+                  );
+                }
+                if (onDimensionsChange && webVideoRef.current.videoWidth > 0) {
+                  onDimensionsChange(
+                    webVideoRef.current.videoWidth,
+                    webVideoRef.current.videoHeight
+                  );
+                }
               }
             }}
           />
@@ -200,7 +303,7 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
       <View style={[styles.container, style, { opacity }]}>
         <VideoView
           player={player}
-          contentFit="cover"
+          contentFit={fitMode}
           nativeControls={false}
           surfaceType={isFlipped ? 'textureView' : 'surfaceView'}
           style={[

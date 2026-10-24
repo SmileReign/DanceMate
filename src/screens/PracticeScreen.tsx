@@ -5,7 +5,9 @@ import {
   StyleSheet,
   TouchableOpacity,
   SafeAreaView,
+  Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   DanceProject,
   Landmark,
@@ -45,7 +47,7 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   const [currentProject, setCurrentProject] = useState<DanceProject>(project);
   const [viewMode, setViewMode] = useState<ViewMode>('ghost');
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
+  const [currentTime, setCurrentTime] = useState(project.trimStart ?? 0);
   const [duration, setDuration] = useState(project.videoDuration || 15);
   const [playbackSpeed, setPlaybackSpeed] = useState(project.playbackSpeed || 1.0);
   const [isFlipped, setIsFlipped] = useState(project.flipReference || false);
@@ -53,6 +55,9 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   const [alignment, setAlignment] = useState<AlignmentSettings>(
     project.alignment || { scale: 1.0, offsetX: 0, offsetY: 0 }
   );
+
+  const insets = useSafeAreaInsets();
+  const safeTop = Math.max(insets.top + 28, Platform.OS === 'android' ? 52 : 40);
 
   // Camera & Live Tracking
   const [cameraFacing, setCameraFacing] = useState<'front' | 'back'>('front');
@@ -106,13 +111,20 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
             videoPlayerRef.current?.setPositionAsync(activeSec.startTime * 1000);
           }
         }
-      } else if (isLooping && pos >= dur - 0.2) {
-        // Full video looping
-        videoPlayerRef.current?.setPositionAsync(0);
+      } else if (isLooping && pos >= (currentProject.trimEnd !== undefined && currentProject.trimEnd > 0 ? currentProject.trimEnd : dur - 0.2)) {
+        // Loop back to start of trimmed dance routine or 0
+        videoPlayerRef.current?.setPositionAsync((currentProject.trimStart ?? 0) * 1000);
       }
     },
-    [isLooping, activeSectionId, sections, repeatTarget, repeatCount, duration]
+    [isLooping, activeSectionId, sections, repeatTarget, repeatCount, duration, currentProject.trimStart, currentProject.trimEnd]
   );
+
+  // Seek video player to trimStart on initial mount if video was trimmed
+  useEffect(() => {
+    if (currentProject.trimStart && currentProject.trimStart > 0) {
+      videoPlayerRef.current?.setPositionAsync(currentProject.trimStart * 1000);
+    }
+  }, [currentProject.trimStart]);
 
   // Controls Handlers
   const handlePlayPause = async () => {
@@ -146,7 +158,7 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   const handleReset = async () => {
     // Reset playback position
     const activeSec = sections.find((s) => s.id === activeSectionId);
-    const targetTime = activeSec ? activeSec.startTime : 0;
+    const targetTime = activeSec ? activeSec.startTime : (currentProject.trimStart ?? 0);
     setCurrentTime(targetTime);
     await videoPlayerRef.current?.setPositionAsync(targetTime * 1000);
 
@@ -239,16 +251,18 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   return (
     <SafeAreaView style={styles.safeContainer}>
       {/* 1. Header Bar */}
-      <View style={styles.topHeader}>
+      <View style={[styles.topHeader, { paddingTop: safeTop, height: 52 + safeTop }]}>
         <TouchableOpacity
           style={styles.backBtn}
           onPress={async () => {
             await persistCurrentProject();
             onBackToLibrary();
           }}
+          activeOpacity={0.8}
+          accessibilityLabel="Back"
         >
           <ChevronLeft size={20} color="#FFF" />
-          <Text style={styles.backText}>Library</Text>
+          <Text style={styles.backText}>Back</Text>
         </TouchableOpacity>
 
         <View style={styles.headerTitleWrap}>
@@ -382,7 +396,7 @@ const styles = StyleSheet.create({
     backgroundColor: THEME.colors.background,
   },
   topHeader: {
-    height: 48,
+    paddingBottom: 8,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',

@@ -1,5 +1,12 @@
 /**
- * MediaPipe 33 Pose Landmark constants and topological connections
+ * Standard 33-Point Full-Body Kinematic Skeleton Landmark Constants
+ *
+ * Fully compliant with MediaPipe Pose / BlazePose:
+ * - 0–10: Head & Face (Nose, Eyes, Ears, Mouth)
+ * - 11–16: Arms (Shoulders, Elbows, Wrists)
+ * - 17–22: Hands & Knuckles (Pinky, Index, Thumb)
+ * - 23–26: Torso & Legs (Hips, Knees)
+ * - 27–32: Feet (Ankles, Heels, Foot Indices)
  */
 
 export const POSE_LANDMARKS = {
@@ -38,63 +45,94 @@ export const POSE_LANDMARKS = {
   RIGHT_FOOT_INDEX: 32,
 } as const;
 
+export const TOTAL_BODY_LANDMARKS = 33;
+export const TOTAL_ELABORATED_LANDMARKS = 33;
+
 export const LANDMARK_NAMES: Record<number, string> = {
   0: 'Nose',
+  1: 'Left Eye Inner',
+  2: 'Left Eye',
+  3: 'Left Eye Outer',
+  4: 'Right Eye Inner',
+  5: 'Right Eye',
+  6: 'Right Eye Outer',
+  7: 'Left Ear',
+  8: 'Right Ear',
+  9: 'Mouth Left',
+  10: 'Mouth Right',
   11: 'Left Shoulder',
   12: 'Right Shoulder',
   13: 'Left Elbow',
   14: 'Right Elbow',
   15: 'Left Wrist',
   16: 'Right Wrist',
+  17: 'Left Pinky',
+  18: 'Right Pinky',
+  19: 'Left Index',
+  20: 'Right Index',
+  21: 'Left Thumb',
+  22: 'Right Thumb',
   23: 'Left Hip',
   24: 'Right Hip',
   25: 'Left Knee',
   26: 'Right Knee',
   27: 'Left Ankle',
   28: 'Right Ankle',
+  29: 'Left Heel',
+  30: 'Right Heel',
+  31: 'Left Foot Index',
+  32: 'Right Foot Index',
 };
 
-// Topological pairs representing bones connecting joints
+// Topological pairs representing bones connecting body joints (35 standard connections)
 export const SKELETON_CONNECTIONS: [number, number][] = [
-  // Head & Neck
+  // Head & Face
   [POSE_LANDMARKS.NOSE, POSE_LANDMARKS.LEFT_EYE],
   [POSE_LANDMARKS.NOSE, POSE_LANDMARKS.RIGHT_EYE],
   [POSE_LANDMARKS.LEFT_EYE, POSE_LANDMARKS.LEFT_EAR],
   [POSE_LANDMARKS.RIGHT_EYE, POSE_LANDMARKS.RIGHT_EAR],
+  [POSE_LANDMARKS.MOUTH_LEFT, POSE_LANDMARKS.MOUTH_RIGHT],
 
-  // Shoulders & Torso Box
+  // Torso / Shoulders Box
   [POSE_LANDMARKS.LEFT_SHOULDER, POSE_LANDMARKS.RIGHT_SHOULDER],
   [POSE_LANDMARKS.LEFT_SHOULDER, POSE_LANDMARKS.LEFT_HIP],
   [POSE_LANDMARKS.RIGHT_SHOULDER, POSE_LANDMARKS.RIGHT_HIP],
   [POSE_LANDMARKS.LEFT_HIP, POSE_LANDMARKS.RIGHT_HIP],
 
-  // Left Arm
+  // Left Arm & Hand
   [POSE_LANDMARKS.LEFT_SHOULDER, POSE_LANDMARKS.LEFT_ELBOW],
   [POSE_LANDMARKS.LEFT_ELBOW, POSE_LANDMARKS.LEFT_WRIST],
-  [POSE_LANDMARKS.LEFT_WRIST, POSE_LANDMARKS.LEFT_INDEX],
   [POSE_LANDMARKS.LEFT_WRIST, POSE_LANDMARKS.LEFT_THUMB],
+  [POSE_LANDMARKS.LEFT_WRIST, POSE_LANDMARKS.LEFT_INDEX],
+  [POSE_LANDMARKS.LEFT_WRIST, POSE_LANDMARKS.LEFT_PINKY],
+  [POSE_LANDMARKS.LEFT_INDEX, POSE_LANDMARKS.LEFT_PINKY],
 
-  // Right Arm
+  // Right Arm & Hand
   [POSE_LANDMARKS.RIGHT_SHOULDER, POSE_LANDMARKS.RIGHT_ELBOW],
   [POSE_LANDMARKS.RIGHT_ELBOW, POSE_LANDMARKS.RIGHT_WRIST],
-  [POSE_LANDMARKS.RIGHT_WRIST, POSE_LANDMARKS.RIGHT_INDEX],
   [POSE_LANDMARKS.RIGHT_WRIST, POSE_LANDMARKS.RIGHT_THUMB],
+  [POSE_LANDMARKS.RIGHT_WRIST, POSE_LANDMARKS.RIGHT_INDEX],
+  [POSE_LANDMARKS.RIGHT_WRIST, POSE_LANDMARKS.RIGHT_PINKY],
+  [POSE_LANDMARKS.RIGHT_INDEX, POSE_LANDMARKS.RIGHT_PINKY],
 
-  // Left Leg
+  // Left Leg & Foot
   [POSE_LANDMARKS.LEFT_HIP, POSE_LANDMARKS.LEFT_KNEE],
   [POSE_LANDMARKS.LEFT_KNEE, POSE_LANDMARKS.LEFT_ANKLE],
   [POSE_LANDMARKS.LEFT_ANKLE, POSE_LANDMARKS.LEFT_HEEL],
+  [POSE_LANDMARKS.LEFT_HEEL, POSE_LANDMARKS.LEFT_FOOT_INDEX],
   [POSE_LANDMARKS.LEFT_ANKLE, POSE_LANDMARKS.LEFT_FOOT_INDEX],
 
-  // Right Leg
+  // Right Leg & Foot
   [POSE_LANDMARKS.RIGHT_HIP, POSE_LANDMARKS.RIGHT_KNEE],
   [POSE_LANDMARKS.RIGHT_KNEE, POSE_LANDMARKS.RIGHT_ANKLE],
   [POSE_LANDMARKS.RIGHT_ANKLE, POSE_LANDMARKS.RIGHT_HEEL],
+  [POSE_LANDMARKS.RIGHT_HEEL, POSE_LANDMARKS.RIGHT_FOOT_INDEX],
   [POSE_LANDMARKS.RIGHT_ANKLE, POSE_LANDMARKS.RIGHT_FOOT_INDEX],
 ];
 
-// Left-to-right symmetric mapping for mirroring / flipping
+// Left-to-right symmetric mapping for horizontal mirroring
 export const FLIP_LANDMARK_MAP: Record<number, number> = {
+  [POSE_LANDMARKS.NOSE]: POSE_LANDMARKS.NOSE,
   [POSE_LANDMARKS.LEFT_EYE_INNER]: POSE_LANDMARKS.RIGHT_EYE_INNER,
   [POSE_LANDMARKS.LEFT_EYE]: POSE_LANDMARKS.RIGHT_EYE,
   [POSE_LANDMARKS.LEFT_EYE_OUTER]: POSE_LANDMARKS.RIGHT_EYE_OUTER,
@@ -129,12 +167,12 @@ export const FLIP_LANDMARK_MAP: Record<number, number> = {
   [POSE_LANDMARKS.RIGHT_FOOT_INDEX]: POSE_LANDMARKS.LEFT_FOOT_INDEX,
 };
 
-// Joint triplets for angular evaluation [PointA, CenterVertexB, PointC]
+// Joint triplets for dance kinematics & angular scoring [PointA, CenterVertexB, PointC]
 export interface JointAngleConfig {
   id: string;
   name: string;
   category: 'arms' | 'legs' | 'torso';
-  points: [number, number, number]; // [A, Vertex, C]
+  points: [number, number, number];
   weight: number;
 }
 
@@ -154,6 +192,14 @@ export const JOINT_ANGLE_CONFIGS: JointAngleConfig[] = [
     points: [POSE_LANDMARKS.LEFT_HIP, POSE_LANDMARKS.LEFT_SHOULDER, POSE_LANDMARKS.LEFT_ELBOW],
     weight: 1.2,
   },
+  {
+    id: 'left_wrist',
+    name: 'Left Wrist',
+    category: 'arms',
+    points: [POSE_LANDMARKS.LEFT_ELBOW, POSE_LANDMARKS.LEFT_WRIST, POSE_LANDMARKS.LEFT_INDEX],
+    weight: 0.8,
+  },
+
   // Right arm
   {
     id: 'right_elbow',
@@ -169,34 +215,43 @@ export const JOINT_ANGLE_CONFIGS: JointAngleConfig[] = [
     points: [POSE_LANDMARKS.RIGHT_HIP, POSE_LANDMARKS.RIGHT_SHOULDER, POSE_LANDMARKS.RIGHT_ELBOW],
     weight: 1.2,
   },
+  {
+    id: 'right_wrist',
+    name: 'Right Wrist',
+    category: 'arms',
+    points: [POSE_LANDMARKS.RIGHT_ELBOW, POSE_LANDMARKS.RIGHT_WRIST, POSE_LANDMARKS.RIGHT_INDEX],
+    weight: 0.8,
+  },
+
   // Left leg
   {
     id: 'left_knee',
     name: 'Left Knee',
     category: 'legs',
     points: [POSE_LANDMARKS.LEFT_HIP, POSE_LANDMARKS.LEFT_KNEE, POSE_LANDMARKS.LEFT_ANKLE],
-    weight: 1.0,
+    weight: 1.1,
   },
   {
     id: 'left_hip',
     name: 'Left Hip',
     category: 'legs',
     points: [POSE_LANDMARKS.LEFT_SHOULDER, POSE_LANDMARKS.LEFT_HIP, POSE_LANDMARKS.LEFT_KNEE],
-    weight: 1.0,
+    weight: 1.1,
   },
+
   // Right leg
   {
     id: 'right_knee',
     name: 'Right Knee',
     category: 'legs',
     points: [POSE_LANDMARKS.RIGHT_HIP, POSE_LANDMARKS.RIGHT_KNEE, POSE_LANDMARKS.RIGHT_ANKLE],
-    weight: 1.0,
+    weight: 1.1,
   },
   {
     id: 'right_hip',
     name: 'Right Hip',
     category: 'legs',
     points: [POSE_LANDMARKS.RIGHT_SHOULDER, POSE_LANDMARKS.RIGHT_HIP, POSE_LANDMARKS.RIGHT_KNEE],
-    weight: 1.0,
+    weight: 1.1,
   },
 ];

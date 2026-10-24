@@ -5,7 +5,9 @@ import {
   StyleSheet,
   TouchableOpacity,
   Modal,
+  Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   Play,
   Pause,
@@ -79,10 +81,12 @@ export const PlaybackControls: React.FC<PlaybackControlsProps> = ({
     return `${mins}:${secs < 10 ? '0' : ''}${secs}.${ms}`;
   };
 
+  const insets = useSafeAreaInsets();
+  const safeBottom = Math.max(insets.bottom + 16, Platform.OS === 'android' ? 52 : 24);
   const progress = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingBottom: safeBottom }]}>
       {/* 1. View Mode Selector Bar */}
       <View style={styles.modeBar}>
         <TouchableOpacity
