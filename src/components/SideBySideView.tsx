@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, LayoutChangeEvent, useWindowDimensions } from 'react-native';
-import { Landmark } from '../types/dance';
+import { View, Text, StyleSheet, LayoutChangeEvent } from 'react-native';
+import { Landmark, ReferencePlayback, BodyFocus } from '../types/dance';
+import { SmoothPoseOverlay, ReferenceHalfMask } from './SmoothPoseOverlay';
+import { isNativePoseAvailable } from '../../modules/dancemate-pose';
 import { SkeletonOverlay } from './SkeletonOverlay';
 import { LiveCameraFeed } from './LiveCameraFeed';
 import { DanceVideoPlayer, DanceVideoPlayerRef } from './DanceVideoPlayer';
@@ -12,7 +14,10 @@ interface SideBySideViewProps {
   playbackSpeed: number;
   isFlipped: boolean;
   cameraFacing: 'front' | 'back';
-  referenceLandmarks: Landmark[] | null;
+  reference: ReferencePlayback;
+  showLiveSkeleton?: boolean;
+  showReferenceSkeleton?: boolean;
+  bodyFocus?: BodyFocus;
   liveLandmarks: Landmark[] | null;
   highlightJoints: number[];
   videoPlayerRef: React.RefObject<DanceVideoPlayerRef | null>;
@@ -26,21 +31,22 @@ export const SideBySideView: React.FC<SideBySideViewProps> = ({
   playbackSpeed,
   isFlipped,
   cameraFacing,
-  referenceLandmarks,
+  reference,
+  showLiveSkeleton = true,
+  showReferenceSkeleton = true,
+  bodyFocus = 'full',
   liveLandmarks,
   highlightJoints,
   videoPlayerRef,
   onPlaybackUpdate,
   onLiveLandmarksDetected,
 }) => {
-  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const isLandscape = screenWidth > screenHeight;
-
   const [refDim, setRefDim] = useState({ width: 0, height: 0 });
   const [liveDim, setLiveDim] = useState({ width: 0, height: 0 });
 
   return (
-    <View style={[styles.container, isLandscape ? styles.row : styles.column]}>
+    // Always left | right, in portrait too.
+    <View style={[styles.container, styles.row]}>
       {/* 1. Reference Video Half */}
       <View
         style={[styles.pane, styles.refPaneBorder]}
@@ -59,13 +65,29 @@ export const SideBySideView: React.FC<SideBySideViewProps> = ({
           onPlaybackUpdate={onPlaybackUpdate}
           style={StyleSheet.absoluteFill}
         />
-        {refDim.width > 0 && refDim.height > 0 && (
-          <SkeletonOverlay
-            landmarks={referenceLandmarks}
+        <ReferenceHalfMask
+          poseData={reference.poseData}
+          currentTime={reference.currentTime}
+          isPlaying={reference.isPlaying}
+          playbackRate={reference.rate}
+          videoSize={reference.videoSize}
+          width={refDim.width}
+          height={refDim.height}
+          bodyFocus={bodyFocus}
+        />
+        {showReferenceSkeleton && refDim.width > 0 && refDim.height > 0 && (
+          <SmoothPoseOverlay
+            poseData={reference.poseData}
+            flip={reference.flip}
+            currentTime={reference.currentTime}
+            isPlaying={reference.isPlaying}
+            playbackRate={reference.rate}
+            videoSize={reference.videoSize}
             width={refDim.width}
             height={refDim.height}
             color={THEME.colors.skeletonReference}
             jointColor={THEME.colors.skeletonReferenceJoint}
+            bodyFocus={bodyFocus}
             isReference={true}
           />
         )}
@@ -85,9 +107,14 @@ export const SideBySideView: React.FC<SideBySideViewProps> = ({
         <LiveCameraFeed
           facing={cameraFacing}
           onLandmarksDetected={onLiveLandmarksDetected}
+          nativeSkeleton={showLiveSkeleton ? {
+            color: THEME.colors.skeletonLive,
+            jointColor: THEME.colors.skeletonLiveJoint,
+            highlightJoints,
+          } : undefined}
           style={StyleSheet.absoluteFill}
         />
-        {liveDim.width > 0 && liveDim.height > 0 && (
+        {showLiveSkeleton && !isNativePoseAvailable && liveDim.width > 0 && liveDim.height > 0 && (
           <SkeletonOverlay
             landmarks={liveLandmarks}
             width={liveDim.width}
@@ -113,9 +140,6 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
   },
-  column: {
-    flexDirection: 'column',
-  },
   pane: {
     flex: 1,
     position: 'relative',
@@ -124,7 +148,6 @@ const styles = StyleSheet.create({
   },
   refPaneBorder: {
     borderRightWidth: 1,
-    borderBottomWidth: 1,
     borderColor: THEME.colors.border,
   },
   badgeLeft: {

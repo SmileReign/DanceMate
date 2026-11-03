@@ -94,6 +94,8 @@ export const SkeletonOverlay = React.memo<SkeletonOverlayProps>(({
   // Collect key visible body joints (33 body landmarks)
   const renderJoints: { idx: number; x: number; y: number; r: number; color: string; opacity: number }[] = [];
   for (let idx = 0; idx < 33; idx++) {
+    // Face: only one head point. Eyes, ears and mouth (1..10) are not drawn.
+    if (idx >= 1 && idx <= 10) continue;
     const pt = pts[idx];
     if (!pt || pt.vis < 0.20) continue;
 
@@ -134,6 +136,8 @@ export const SkeletonOverlay = React.memo<SkeletonOverlayProps>(({
 
     const radius = isSelected
       ? 8
+      : idx === POSE_LANDMARKS.NOSE
+      ? 7
       : isHighlighted
       ? 6.5
       : isMajorBodyJoint

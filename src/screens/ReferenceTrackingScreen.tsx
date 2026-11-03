@@ -7,11 +7,14 @@ import {
   ScrollView,
   LayoutChangeEvent,
   Platform,
+  BackHandler,
 } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { DanceProject, CandidateDancer } from '../types/dance';
+import { DanceProject, CandidateDancer, PoseFrame } from '../types/dance';
 import { DanceVideoPlayer, DanceVideoPlayerRef } from '../components/DanceVideoPlayer';
-import { SkeletonOverlay } from '../components/SkeletonOverlay';
+import { SmoothPoseOverlay } from '../components/SmoothPoseOverlay';
+import { isNativePoseAvailable, NativePose } from '../../modules/dancemate-pose';
 import { ManualLandmarkEditor } from '../components/ManualLandmarkEditor';
 import { VideoTrimmer } from '../components/VideoTrimmer';
 import { PoseTracker } from '../services/poseTracker';
@@ -31,18 +34,25 @@ import {
   CheckCircle2,
   Repeat,
   AlertCircle,
+  Maximize,
+  Minimize2,
 } from 'lucide-react-native';
 
 interface ReferenceTrackingScreenProps {
   project: DanceProject;
   onSaveAndStartPractice: (updatedProject: DanceProject) => void;
   onBack: () => void;
+  /** Start analysing the trimmed routine again as soon as the screen is ready. */
+  autoReanalyze?: boolean;
+  onAutoReanalyzeStarted?: () => void;
 }
 
 export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = ({
   project,
   onSaveAndStartPractice,
   onBack,
+  autoReanalyze = false,
+  onAutoReanalyzeStarted,
 }) => {
   const insets = useSafeAreaInsets();
   const headerTopPadding = Math.max(insets.top + 28, Platform.OS === 'android' ? 52 : 40);
@@ -66,15 +76,40 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
   // Multi-dancer candidate state
   const [candidates, setCandidates] = useState<CandidateDancer[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<CandidateDancer | null>(null);
+  // With several dancers the user must say which one to follow before analysis starts.
+  const [dancerConfirmed, setDancerConfirmed] = useState(false);
+  const [showDancerPicker, setShowDancerPicker] = useState(false);
+  const [scanDone, setScanDone] = useState(false);
+  const [infoReady, setInfoReady] = useState(!isNativePoseAvailable);
+  // Most dancers seen in any scanned frame (so analysis tracks enough people to follow ours).
+  const [maxDancers, setMaxDancers] = useState(1);
+  // Analysis waiting for the dancer choice.
+  const [pendingAnalysis, setPendingAnalysis] = useState<{ start: number; end: number } | null>(null);
 
   // Manual Trimming state: open trimmer if video is not tracked yet
   const [isTrimMode, setIsTrimMode] = useState(!isInitiallyTracked);
   const [trimStart, setTrimStart] = useState(project.trimStart ?? 0);
+  // The trim end follows the real video length until the user drags the trim handle.
+  // A saved trim end of exactly 1s came from an old bug (placeholder length), so it is reset.
+  const initialTrimEndIsAuto =
+    project.trimEnd === undefined || project.trimEnd <= 0 || (project.trimEnd === 1 && !project.trimStart);
+  const trimEndIsAutoRef = useRef(initialTrimEndIsAuto);
   const [trimEnd, setTrimEnd] = useState(
-    project.trimEnd !== undefined && project.trimEnd > 0
+    !initialTrimEndIsAuto && project.trimEnd !== undefined
       ? project.trimEnd
       : (project.videoDuration || 15)
   );
+
+  // Full screen: only the video and its skeleton.
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setIsFullscreen(false);
+      return true;
+    });
+    return () => sub.remove();
+  }, [isFullscreen]);
 
   // Joint Mismatch Adjustment Mode
   const [isJointEditMode, setIsJointEditMode] = useState(false);
@@ -82,7 +117,10 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
 
   // Layout & Video Dimensions
   const [viewportDim, setViewportDim] = useState({ width: 0, height: 0 });
-  const [videoDims, setVideoDims] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  const [videoDims, setVideoDims] = useState<{ width: number; height: number }>({
+    width: project.videoWidth ?? 0,
+    height: project.videoHeight ?? 0,
+  });
 
   const videoRef = useRef<DanceVideoPlayerRef | null>(null);
   const cancelTrackerRef = useRef<{ current: boolean }>({ current: false });
@@ -128,31 +166,135 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
       ? flipLandmarks(rawInterpolatedLandmarks)
       : rawInterpolatedLandmarks;
 
+  // Android: read the real (upright) video size so the skeleton lines up with the picture.
+  useEffect(() => {
+    if (!isNativePoseAvailable || !project.videoUri) return;
+    let isMounted = true;
+    NativePose.getVideoInfo(project.videoUri)
+      .then((info) => {
+        if (!isMounted) return;
+        if (info.width > 0 && info.height > 0) {
+          setVideoDims({ width: info.width, height: info.height });
+        }
+        // Exact length straight from the file, before the player has even loaded.
+        if (info.durationMs > 0) {
+          const secs = info.durationMs / 1000;
+          setDuration(secs);
+          if (trimEndIsAutoRef.current) setTrimEnd(secs);
+        }
+        setInfoReady(true);
+      })
+      .catch((err) => {
+        console.warn('Could not read video info:', err);
+        if (isMounted) setInfoReady(true);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [project.videoUri]);
+
   // Scan dancers at start position
   useEffect(() => {
     let isMounted = true;
     const scan = async () => {
+      if (isNativePoseAvailable) {
+        try {
+          const { candidates: found } = await PoseTracker.detectCandidatesNative(
+            project.videoUri,
+            trimStart
+          );
+          if (isMounted) {
+            setCandidates(found);
+            setMaxDancers((m) => Math.max(m, found.length));
+            setSelectedCandidate((prev) => {
+              if (prev && found.some((c) => c.id === prev.id)) return found.find((c) => c.id === prev.id)!;
+              // Pre-select the dancer used last time (the user still confirms).
+              const saved = found.find((c) => c.id === project.selectedDancerId);
+              return saved ?? found[0] ?? null;
+            });
+            if (found.length > 1) {
+              setDancerConfirmed(false);
+            }
+          }
+        } catch (err) {
+          console.warn('Dancer scan failed:', err);
+        }
+        if (isMounted) setScanDone(true);
+        return;
+      }
       await videoRef.current?.waitForReadyAsync(3000);
       const nativeVideo = videoRef.current?.getNativeVideoElement();
       if (nativeVideo && isMounted) {
         const found = await PoseTracker.detectCandidatesAtTime(nativeVideo, trimStart);
         if (isMounted && found.length > 0) {
           setCandidates(found);
+          setMaxDancers((m) => Math.max(m, found.length));
           setSelectedCandidate((prev) => prev ?? found[0]);
+          if (found.length > 1) setDancerConfirmed(false);
         }
       }
+      if (isMounted) setScanDone(true);
     };
-    scan();
+    // Wait briefly so dragging the trim handle doesn't start a scan for every position.
+    const timer = setTimeout(scan, isNativePoseAvailable ? 400 : 0);
     return () => {
       isMounted = false;
+      clearTimeout(timer);
     };
+  }, [trimStart, project.videoUri, project.selectedDancerId]);
+
+  // Dancers can walk in later: check a few more moments of the routine for extra people.
+  useEffect(() => {
+    if (!isNativePoseAvailable || !scanDone) return;
+    let cancelled = false;
+    const span = Math.max(0, (trimEnd > trimStart ? trimEnd : duration) - trimStart);
+    if (span < 1) return;
+    (async () => {
+      for (const f of [0.25, 0.5, 0.75]) {
+        if (cancelled) return;
+        try {
+          const { candidates: found } = await PoseTracker.detectCandidatesNative(project.videoUri, trimStart + span * f);
+          if (!cancelled) setMaxDancers((m) => Math.max(m, found.length));
+        } catch {
+          // ignore: this scan is only a hint
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanDone, trimStart, trimEnd, project.videoUri]);
+
+  const openDancerPicker = useCallback(async () => {
+    // The boxes belong to the first frame of the routine: show exactly that frame.
+    await videoRef.current?.pauseAsync();
+    setIsPlaying(false);
+    await videoRef.current?.setPositionAsync(trimStart * 1000);
+    setCurrentTime(trimStart);
+    setShowDancerPicker(true);
   }, [trimStart]);
+
+  // Several dancers found and none chosen yet: ask right away (not during analysis or preview).
+  const askedForDancerRef = useRef(false);
+  useEffect(() => {
+    if (!scanDone || candidates.length < 2 || dancerConfirmed || isTracking) return;
+    if (askedForDancerRef.current) return;
+    if (!isTrimMode && !autoReanalyze) return;
+    const id = setTimeout(() => {
+      askedForDancerRef.current = true;
+      openDancerPicker();
+    }, 0);
+    return () => clearTimeout(id);
+  }, [scanDone, candidates.length, dancerConfirmed, isTracking, isTrimMode, autoReanalyze, openDancerPicker]);
 
   // --- Real-Time Reference Motion Extraction Engine ---
   const runAutoTracking = useCallback(
-    async (startSec?: number, endSec?: number) => {
+    async (startSec?: number, endSec?: number, dancerOverride?: CandidateDancer | null) => {
       const effStart = startSec !== undefined ? startSec : trimStart;
       const effEnd = endSec !== undefined ? endSec : trimEnd;
+      const dancer = dancerOverride !== undefined ? dancerOverride : selectedCandidate;
+      setShowDancerPicker(false);
 
       setIsTrimMode(false);
       setIsTracking(true);
@@ -162,31 +304,58 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
       cancelTrackerRef.current.current = false;
 
       try {
-        await videoRef.current?.waitForReadyAsync(4000);
-        const nativeVideo = videoRef.current?.getNativeVideoElement();
-
-        if (nativeVideo && nativeVideo.videoWidth > 0) {
-          setVideoDims({ width: nativeVideo.videoWidth, height: nativeVideo.videoHeight });
-        }
-
         const effectiveEnd = effEnd > effStart ? effEnd : duration;
+        let frames: PoseFrame[];
+        let dims = videoDims;
 
-        const frames = await PoseTracker.trackReferenceVideo(
-          nativeVideo,
-          duration,
-          (progress, currentFrame, statusText) => {
-            setTrackingProgress(progress);
-            setTrackingStatusText(statusText);
-            if (currentFrame) {
-              setCurrentTime(currentFrame.timestamp);
-            }
-          },
-          cancelTrackerRef.current,
-          selectedCandidate,
-          effStart,
-          effectiveEnd,
-          30 // Deterministic 30 FPS dance frame capture
-        );
+        if (isNativePoseAvailable) {
+          // Android: every frame is decoded and tracked on the phone with the most accurate model.
+          await videoRef.current?.pauseAsync();
+          setIsPlaying(false);
+          const result = await PoseTracker.trackReferenceVideoNative(
+            currentProject.videoUri,
+            (progress, _frame, statusText) => {
+              setTrackingProgress(progress);
+              setTrackingStatusText(statusText);
+            },
+            cancelTrackerRef.current,
+            dancer,
+            effStart,
+            effectiveEnd,
+            Math.max(1, candidates.length, maxDancers),
+            30
+          );
+          frames = result.frames;
+          if (result.width > 0 && result.height > 0) {
+            dims = { width: result.width, height: result.height };
+            setVideoDims(dims);
+          }
+        } else {
+          await videoRef.current?.waitForReadyAsync(4000);
+          const nativeVideo = videoRef.current?.getNativeVideoElement();
+
+          if (nativeVideo && nativeVideo.videoWidth > 0) {
+            dims = { width: nativeVideo.videoWidth, height: nativeVideo.videoHeight };
+            setVideoDims(dims);
+          }
+
+          frames = await PoseTracker.trackReferenceVideo(
+            nativeVideo,
+            duration,
+            (progress, currentFrame, statusText) => {
+              setTrackingProgress(progress);
+              setTrackingStatusText(statusText);
+              if (currentFrame) {
+                setCurrentTime(currentFrame.timestamp);
+              }
+            },
+            cancelTrackerRef.current,
+            dancer,
+            effStart,
+            effectiveEnd,
+            30 // Deterministic 30 FPS dance frame capture
+          );
+        }
 
         if (!cancelTrackerRef.current.current && frames.length > 0) {
           const updated: DanceProject = {
@@ -196,8 +365,10 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
             videoDuration: duration,
             trimStart: effStart,
             trimEnd: effectiveEnd,
-            selectedDancerId: selectedCandidate?.id,
-            selectedDancerLabel: selectedCandidate?.label,
+            selectedDancerId: dancer?.id,
+            selectedDancerLabel: dancer?.label,
+            videoWidth: dims.width > 0 ? dims.width : currentProject.videoWidth,
+            videoHeight: dims.height > 0 ? dims.height : currentProject.videoHeight,
           };
           setCurrentProject(updated);
           await StorageService.saveProject(updated);
@@ -243,11 +414,44 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
         );
       }
     },
-    [currentProject, duration, trimStart, trimEnd, selectedCandidate]
+    [currentProject, duration, trimStart, trimEnd, selectedCandidate, candidates.length, maxDancers, videoDims]
   );
+
+  /** Starts analysis, first asking which dancer to follow when there are several. */
+  const requestAnalysis = useCallback(
+    (start: number, end: number) => {
+      if (candidates.length > 1 && !dancerConfirmed) {
+        setPendingAnalysis({ start, end });
+        openDancerPicker();
+        return;
+      }
+      runAutoTracking(start, end);
+    },
+    [candidates.length, dancerConfirmed, openDancerPicker, runAutoTracking]
+  );
+
+  const confirmDancer = (dancer: CandidateDancer) => {
+    setSelectedCandidate(dancer);
+    setDancerConfirmed(true);
+    setShowDancerPicker(false);
+    const pending = pendingAnalysis;
+    setPendingAnalysis(null);
+    if (pending) runAutoTracking(pending.start, pending.end, dancer);
+  };
+
+  // "Re-analyze" from Practice: start as soon as the video length and dancers are known.
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (!autoReanalyze || autoStartedRef.current || !scanDone || !infoReady) return;
+    autoStartedRef.current = true;
+    onAutoReanalyzeStarted?.();
+    const end = trimEnd > trimStart ? trimEnd : duration;
+    requestAnalysis(trimStart, end);
+  }, [autoReanalyze, scanDone, infoReady, trimStart, trimEnd, duration, requestAnalysis, onAutoReanalyzeStarted]);
 
   // Manual Trim Handler (called directly as user drags handles)
   const handleTrimChange = (start: number, end: number) => {
+    trimEndIsAutoRef.current = false;
     setTrimStart(start);
     setTrimEnd(end);
   };
@@ -339,7 +543,9 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
 
   return (
     <View style={styles.container}>
+      <StatusBar hidden={isFullscreen} style="light" />
       {/* 1. Header Bar */}
+      {!isFullscreen && (
       <View style={[styles.header, { paddingTop: headerTopPadding }]}>
         <TouchableOpacity style={styles.backBtn} onPress={onBack} activeOpacity={0.8} accessibilityLabel="Back">
           <ChevronLeft size={20} color={THEME.colors.textPrimary} />
@@ -368,9 +574,13 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
           <Text style={styles.headerPracticeBtnText}>Practice</Text>
         </TouchableOpacity>
       </View>
+      )}
 
       {/* 2. Main Video & Skeleton Viewport */}
-      <View style={styles.viewport} onLayout={handleViewportLayout}>
+      <View
+        style={isFullscreen ? styles.viewportFullscreen : styles.viewport}
+        onLayout={handleViewportLayout}
+      >
         <DanceVideoPlayer
           ref={videoRef}
           sourceUri={currentProject.videoUri}
@@ -385,15 +595,21 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
           }}
           onPlaybackUpdate={(pos, dur) => {
             setCurrentTime(pos);
-            if (dur > 0 && Math.abs(duration - dur) > 1) {
+            if (dur > 0 && Math.abs(duration - dur) > 0.05) {
               setDuration(dur);
-              if (trimEnd <= 0 || trimEnd === 15) {
+              if (trimEndIsAutoRef.current) {
                 setTrimEnd(dur);
               }
             }
             // Loop back to trimStart when reaching trimEnd in trim or preview mode
             const targetEnd = trimEnd > trimStart ? trimEnd : dur;
-            if ((isTrimMode || (isPreviewMode && isLoopingPreview)) && pos >= targetEnd - 0.08) {
+            // Only while playing: when paused on the end handle, its frame must stay visible.
+            if (
+              isPlaying &&
+              targetEnd > 0 &&
+              (isTrimMode || (isPreviewMode && isLoopingPreview)) &&
+              pos >= targetEnd - 0.08
+            ) {
               videoRef.current?.setPositionAsync(trimStart * 1000);
               setCurrentTime(trimStart);
             }
@@ -413,8 +629,12 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
             }}
             pointerEvents={isJointEditMode ? 'box-none' : 'none'}
           >
-            <SkeletonOverlay
-              landmarks={currentLandmarks}
+            <SmoothPoseOverlay
+              poseData={currentProject.poseData}
+              flip={currentProject.flipReference}
+              currentTime={currentTime}
+              isPlaying={isPlaying}
+              playbackRate={previewSpeed}
               width={videoBounds.width}
               height={videoBounds.height}
               color={THEME.colors.skeletonReference}
@@ -429,9 +649,8 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
         )}
 
         {/* Live HUD chip in Preview Mode */}
-        {isPreviewMode && !isTrimMode && !isJointEditMode && !isTracking && (
+        {!isFullscreen && isPreviewMode && !isTrimMode && !isJointEditMode && !isTracking && (
           <View style={styles.previewHudChip}>
-            <View style={styles.previewLiveDot} />
             <Text style={styles.previewHudText}>33 JOINTS TRACKED</Text>
             <View style={styles.previewHudDivider} />
             <Text style={styles.previewHudSub}>{currentProject.poseData.length} FRAMES</Text>
@@ -447,6 +666,84 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
                 ? 'Nudge joint position below to fix placement'
                 : 'Tap on any joint in the dancer skeleton to adjust'}
             </Text>
+          </View>
+        )}
+
+        {/* Full-screen toggle */}
+        {!isTracking && !isJointEditMode && (
+          <TouchableOpacity
+            style={[styles.fullscreenBtn, isFullscreen && styles.fullscreenBtnFaint]}
+            onPress={() => setIsFullscreen((f) => !f)}
+            activeOpacity={0.7}
+            hitSlop={10}
+            accessibilityLabel={isFullscreen ? 'Exit full screen' : 'Full screen'}
+          >
+            {isFullscreen ? <Minimize2 size={14} color="#FFF" /> : <Maximize size={14} color="#FFF" />}
+          </TouchableOpacity>
+        )}
+
+        {/* Dancer picker: a numbered box on every dancer, tap one to follow */}
+        {showDancerPicker && !isTracking && candidates.length > 1 && videoBounds.width > 0 && (
+          <View style={StyleSheet.absoluteFill}>
+            <View style={styles.pickerDim} pointerEvents="none" />
+            {candidates.map((cand, i) => {
+              const flip = currentProject.flipReference;
+              const minX = flip ? 1 - cand.box.maxX : cand.box.minX;
+              const maxX = flip ? 1 - cand.box.minX : cand.box.maxX;
+              const isSel = selectedCandidate?.id === cand.id;
+              return (
+                <TouchableOpacity
+                  key={cand.id}
+                  activeOpacity={0.8}
+                  onPress={() => setSelectedCandidate(cand)}
+                  accessibilityLabel={`Choose ${cand.label}`}
+                  style={[
+                    styles.dancerBox,
+                    isSel && styles.dancerBoxActive,
+                    {
+                      left: videoBounds.left + minX * videoBounds.width,
+                      top: videoBounds.top + cand.box.minY * videoBounds.height,
+                      width: Math.max(24, (maxX - minX) * videoBounds.width),
+                      height: Math.max(40, (cand.box.maxY - cand.box.minY) * videoBounds.height),
+                    },
+                  ]}
+                >
+                  <View style={[styles.dancerBoxTag, isSel && styles.dancerBoxTagActive]}>
+                    <Text style={[styles.dancerBoxTagText, isSel && { color: '#000' }]}>{i + 1}</Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+            <View style={styles.pickerBanner} pointerEvents="none">
+              <Users size={14} color="#00F5D4" />
+              <Text style={styles.pickerBannerText}>
+                {candidates.length} dancers found · tap the one you want to learn
+              </Text>
+            </View>
+            <View style={styles.pickerActions}>
+              <TouchableOpacity
+                style={styles.pickerCancel}
+                onPress={() => {
+                  setPendingAnalysis(null);
+                  setShowDancerPicker(false);
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.pickerCancelText}>Later</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.pickerConfirm, !selectedCandidate && { opacity: 0.5 }]}
+                disabled={!selectedCandidate}
+                onPress={() => selectedCandidate && confirmDancer(selectedCandidate)}
+                activeOpacity={0.85}
+              >
+                <Check size={14} color="#000" />
+                <Text style={styles.pickerConfirmText}>
+                  Follow dancer {selectedCandidate ? candidates.findIndex((c) => c.id === selectedCandidate.id) + 1 : ''}
+                  {pendingAnalysis ? ' & analyze' : ''}
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         )}
 
@@ -477,6 +774,8 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
         )}
       </View>
 
+      {!isFullscreen && (
+      <>
       {/* 3. Manual Landmark Nudge Controller (Shown when a joint is selected) */}
       {isJointEditMode && selectedLandmarkIdx !== null && (
         <ManualLandmarkEditor
@@ -491,7 +790,9 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
         <View style={styles.dancerPickerContainer}>
           <View style={styles.dancerPickerHeader}>
             <Users size={14} color="#00F5D4" />
-            <Text style={styles.dancerPickerTitle}>Follow Dancer:</Text>
+            <Text style={styles.dancerPickerTitle}>
+              {dancerConfirmed ? 'Following:' : 'Choose dancer:'}
+            </Text>
           </View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.dancerPickerScroll}>
             {candidates.map((cand) => {
@@ -500,7 +801,10 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
                 <TouchableOpacity
                   key={cand.id}
                   style={[styles.dancerPill, isSelected && styles.dancerPillActive]}
-                  onPress={() => setSelectedCandidate(cand)}
+                  onPress={() => {
+                    setSelectedCandidate(cand);
+                    openDancerPicker();
+                  }}
                   activeOpacity={0.8}
                 >
                   <View style={[styles.dancerPillDot, isSelected && styles.dancerPillDotActive]} />
@@ -561,12 +865,18 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
           onTrimChange={handleTrimChange}
           onSeek={handleSeek}
           onPlayPause={handlePlayPause}
-          onConfirm={() => runAutoTracking(trimStart, trimEnd)}
+          onConfirm={() => requestAnalysis(trimStart, trimEnd)}
+          onDragStart={() => {
+            if (isPlaying) {
+              videoRef.current?.pauseAsync();
+              setIsPlaying(false);
+            }
+          }}
           onResetOrFull={() => {
             if (isInitiallyTracked) {
               setIsTrimMode(false);
             } else {
-              runAutoTracking(0, duration);
+              requestAnalysis(0, duration);
             }
           }}
           confirmLabel={isInitiallyTracked ? 'Save & Re-analyze ⚡' : 'Analyze Dance ⚡'}
@@ -713,6 +1023,8 @@ export const ReferenceTrackingScreen: React.FC<ReferenceTrackingScreenProps> = (
           </View>
         </View>
       )}
+      </>
+      )}
     </View>
   );
 };
@@ -773,6 +1085,33 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     color: '#000',
+  },
+  viewportFullscreen: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000',
+    zIndex: 100,
+  },
+  fullscreenBtn: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 20,
+  },
+  fullscreenBtnFaint: {
+    top: 28,
+    opacity: 0.55,
   },
   viewport: {
     flex: 1,
@@ -1102,6 +1441,79 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#FFFFFF',
   },
+  pickerDim: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.35)' },
+  dancerBox: {
+    position: 'absolute',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.75)',
+    borderRadius: 8,
+    borderStyle: 'dashed',
+  },
+  dancerBoxActive: {
+    borderColor: '#00F5D4',
+    borderStyle: 'solid',
+    borderWidth: 3,
+    backgroundColor: 'rgba(0, 245, 212, 0.12)',
+  },
+  dancerBoxTag: {
+    position: 'absolute',
+    top: -12,
+    alignSelf: 'center',
+    minWidth: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(15, 19, 29, 0.9)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.75)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dancerBoxTagActive: { backgroundColor: '#00F5D4', borderColor: '#00F5D4' },
+  dancerBoxTagText: { fontSize: 12, fontWeight: '900', color: '#FFF' },
+  pickerBanner: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    right: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 7,
+    borderRadius: 10,
+    backgroundColor: 'rgba(15, 19, 29, 0.85)',
+  },
+  pickerBannerText: { fontSize: 12, fontWeight: '700', color: '#FFF' },
+  pickerActions: {
+    position: 'absolute',
+    left: 10,
+    right: 10,
+    bottom: 10,
+    flexDirection: 'row',
+    gap: 8,
+  },
+  pickerCancel: {
+    paddingHorizontal: 16,
+    height: 40,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(15, 19, 29, 0.85)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+  },
+  pickerCancelText: { fontSize: 13, fontWeight: '700', color: '#FFF' },
+  pickerConfirm: {
+    flex: 1,
+    height: 40,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#00F5D4',
+  },
+  pickerConfirmText: { fontSize: 13, fontWeight: '800', color: '#000' },
   dancerPickerContainer: {
     flexDirection: 'row',
     alignItems: 'center',

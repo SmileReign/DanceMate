@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -7,6 +7,7 @@ import {
   Dimensions,
   Platform,
   SafeAreaView,
+  BackHandler,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Landmark, DanceProject } from '../types/dance';
@@ -15,6 +16,7 @@ import { flipLandmarks, mapCoverLandmarks } from '../services/motionComparison';
 import { SkeletonOneEuroFilter } from '../services/oneEuroFilter';
 import { MotionMetricsEngine, MotionMetrics } from '../services/motionMetrics';
 import { SkeletonOverlay } from '../components/SkeletonOverlay';
+import { PoseCameraView, flatToLandmarks, type PoseEventPayload } from '../../modules/dancemate-pose';
 import { THEME } from '../constants/theme';
 import {
   Camera,
@@ -29,10 +31,14 @@ import {
   CheckCircle2,
   Play,
   Music,
+  Maximize,
+  Minimize2,
 } from 'lucide-react-native';
 
 interface LiveMotionTrackingScreenProps {
   onBackToHome: () => void;
+  /** Lets the app hide its tab bar while the camera is full screen. */
+  onFullscreenChange?: (isFullscreen: boolean) => void;
   onSelectProjectForPractice?: (project: DanceProject) => void;
   projects?: DanceProject[];
 }
@@ -43,6 +49,7 @@ type DanceStyle = 'groove' | 'kpop' | 'shuffle' | 'wave';
 
 export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> = ({
   onBackToHome,
+  onFullscreenChange,
   onSelectProjectForPractice,
   projects = [],
 }) => {
@@ -68,6 +75,30 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
   // Session duration timer
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
+  // Full screen: only the camera picture and skeleton, nothing else.
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const toggleFullscreen = () => {
+    const next = !isFullscreen;
+    setIsFullscreen(next);
+    onFullscreenChange?.(next);
+  };
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setIsFullscreen(false);
+      onFullscreenChange?.(false);
+      return true;
+    });
+    return () => sub.remove();
+  }, [isFullscreen, onFullscreenChange]);
+  useEffect(() => () => onFullscreenChange?.(false), [onFullscreenChange]);
+
+  // Measured tracking speed (Android native tracker)
+  const [trackerFps, setTrackerFps] = useState<number | null>(null);
+  const [trackerError, setTrackerError] = useState<string | null>(null);
+  const lastUiUpdateRef = useRef(0);
+  const hasBodyRef = useRef(false);
+
   // Performance refs
   const prevLandmarksRef = useRef<Landmark[] | null>(null);
   const oneEuroFilterRef = useRef(
@@ -92,8 +123,39 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
     return `${m < 10 ? '0' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
-  // Real-time kinematic dance pose tracking loop
+  // Android: poses arrive from the on-device tracker. The skeleton itself is drawn natively on
+  // the camera picture, so here we only update metrics, a few times per second.
+  const handleNativePose = useCallback((event: { nativeEvent: PoseEventPayload }) => {
+    const { landmarks: flat, fps } = event.nativeEvent;
+    const lms = flatToLandmarks(flat) as Landmark[] | null;
+    const now = Date.now();
+
+    if (lms) {
+      const computed = metricsEngineRef.current.compute(lms, now);
+      prevLandmarksRef.current = lms;
+      if (!hasBodyRef.current || now - lastUiUpdateRef.current > 80) {
+        lastUiUpdateRef.current = now;
+        hasBodyRef.current = true;
+        setLandmarks(lms);
+        setMetrics(computed);
+        setTrackerFps(fps);
+      }
+    } else if (hasBodyRef.current || now - lastUiUpdateRef.current > 250) {
+      lastUiUpdateRef.current = now;
+      hasBodyRef.current = false;
+      setLandmarks(null);
+      setTrackerFps(fps);
+      setMetrics((prev) => ({
+        ...prev,
+        energy: Math.max(0, prev.energy - 6),
+        isBodyFramed: false,
+      }));
+    }
+  }, []);
+
+  // Real-time kinematic dance pose tracking loop (web browser camera only)
   useEffect(() => {
+    if (Platform.OS !== 'web') return;
     let isRunning = true;
 
     const trackingLoop = () => {
@@ -279,7 +341,23 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
   return (
     <View style={styles.container}>
       {/* 1. REAL NATIVE CAMERA VIEW */}
-      {Platform.OS !== 'web' ? (
+      {Platform.OS !== 'web' && PoseCameraView ? (
+        <PoseCameraView
+          style={StyleSheet.absoluteFill}
+          facing={facing}
+          mirror={isMirrored}
+          model="full"
+          showSkeleton={skeletonStyle !== 'hidden'}
+          skeletonColor={skeletonColors.bone}
+          jointColor={skeletonColors.joint}
+          strokeWidth={skeletonColors.width}
+          onPose={handleNativePose}
+          onTrackerStatus={(e) => {
+            const { status, message } = e.nativeEvent;
+            setTrackerError(status === 'error' ? message || 'Tracker error' : null);
+          }}
+        />
+      ) : Platform.OS !== 'web' ? (
         <CameraView
           style={StyleSheet.absoluteFill}
           facing={facing}
@@ -301,7 +379,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
       )}
 
       {/* 2. Full Body Framing Guide (Green neon boundary) */}
-      {showFramingGuide && (
+      {!isFullscreen && showFramingGuide && (
         <View style={styles.framingGuideContainer} pointerEvents="none">
           <View
             style={[
@@ -316,14 +394,12 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
 
             {/* Real-time Status Badge inside framing box */}
             <View style={styles.framingStatusPill}>
-              <View
-                style={[
-                  styles.framingStatusDot,
-                  landmarks ? styles.dotTracking : styles.dotSearching,
-                ]}
-              />
               <Text style={styles.framingStatusText}>
-                {landmarks ? '33 Joints Locked • Live Tracking' : 'Step back to frame full body'}
+                {trackerError
+                  ? trackerError
+                  : landmarks
+                  ? '33 Joints Locked • Live Tracking'
+                  : 'Step back to frame full body'}
               </Text>
             </View>
           </View>
@@ -331,7 +407,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
       )}
 
       {/* 3. Live Glowing Skeleton Overlay */}
-      {skeletonStyle !== 'hidden' && landmarks && (
+      {Platform.OS === 'web' && skeletonStyle !== 'hidden' && landmarks && (
         <SkeletonOverlay
           landmarks={landmarks}
           width={SCREEN_WIDTH}
@@ -343,6 +419,8 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
         />
       )}
 
+      {!isFullscreen && (
+      <>
       {/* 4. Top HUD Header */}
       <SafeAreaView style={styles.topHud}>
         <View style={styles.topBarRow}>
@@ -352,22 +430,18 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
             onPress={onBackToHome}
             activeOpacity={0.8}
           >
-            <ArrowLeft size={20} color="#FFFFFF" />
+            <ArrowLeft size={16} color="#FFFFFF" />
           </TouchableOpacity>
 
           {/* Camera Active Badge */}
           <View style={styles.badgeRow}>
-            <View
-              style={[
-                styles.liveIndicatorDot,
-                !landmarks && { backgroundColor: '#F59E0B' },
-              ]}
-            />
             <Text style={styles.liveBadgeText}>
               {landmarks ? 'LIVE AI TRACKING' : 'SEARCHING FOR DANCER'}
             </Text>
             <View style={styles.badgeDivider} />
-            <Text style={styles.fpsBadgeText}>60 FPS</Text>
+            <Text style={styles.fpsBadgeText}>
+              {trackerFps !== null ? `${Math.round(trackerFps)} FPS` : Platform.OS === 'web' ? '60 FPS' : '-- FPS'}
+            </Text>
           </View>
 
           {/* Session Timer */}
@@ -385,7 +459,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
           onPress={handleToggleFacing}
           activeOpacity={0.8}
         >
-          <RefreshCw size={18} color="#FFFFFF" />
+          <RefreshCw size={14} color="#FFFFFF" />
           <Text style={styles.controlMicroLabel}>{facing === 'front' ? 'Front' : 'Back'}</Text>
         </TouchableOpacity>
 
@@ -395,7 +469,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
           onPress={() => setIsMirrored((m) => !m)}
           activeOpacity={0.8}
         >
-          <Sliders size={18} color={isMirrored ? '#000000' : '#FFFFFF'} />
+          <Sliders size={14} color={isMirrored ? '#000000' : '#FFFFFF'} />
           <Text style={styles.controlMicroLabel}>Mirror</Text>
         </TouchableOpacity>
 
@@ -409,9 +483,9 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
           activeOpacity={0.8}
         >
           {skeletonStyle === 'hidden' ? (
-            <EyeOff size={18} color={THEME.colors.textMuted} />
+            <EyeOff size={14} color={THEME.colors.textMuted} />
           ) : (
-            <Eye size={18} color={skeletonColors.bone} />
+            <Eye size={14} color={skeletonColors.bone} />
           )}
           <Text style={styles.controlMicroLabel}>Skeleton</Text>
         </TouchableOpacity>
@@ -422,7 +496,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
           onPress={handleCycleStyle}
           activeOpacity={0.8}
         >
-          <Zap size={18} color="#FF70A6" />
+          <Zap size={14} color="#FF70A6" />
           <Text style={styles.controlMicroLabel}>{danceStyle.toUpperCase()}</Text>
         </TouchableOpacity>
 
@@ -432,7 +506,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
           onPress={handleCycleBpm}
           activeOpacity={0.8}
         >
-          <Music size={18} color="#00F5D4" />
+          <Music size={14} color="#00F5D4" />
           <Text style={styles.controlMicroLabel}>{targetBpm} BPM</Text>
         </TouchableOpacity>
 
@@ -442,7 +516,7 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
           onPress={() => setShowFramingGuide((g) => !g)}
           activeOpacity={0.8}
         >
-          <Activity size={18} color={showFramingGuide ? '#000000' : '#FFFFFF'} />
+          <Activity size={14} color={showFramingGuide ? '#000000' : '#FFFFFF'} />
           <Text style={styles.controlMicroLabel}>Frame</Text>
         </TouchableOpacity>
       </View>
@@ -520,6 +594,19 @@ export const LiveMotionTrackingScreen: React.FC<LiveMotionTrackingScreenProps> =
           </TouchableOpacity>
         )}
       </View>
+      </>
+      )}
+
+      {/* Full-screen toggle (the only control left in full screen) */}
+      <TouchableOpacity
+        style={[styles.fullscreenBtn, isFullscreen && styles.fullscreenBtnFaint]}
+        onPress={toggleFullscreen}
+        activeOpacity={0.7}
+        accessibilityLabel={isFullscreen ? 'Exit full screen' : 'Full screen'}
+        hitSlop={10}
+      >
+        {isFullscreen ? <Minimize2 size={14} color="#FFFFFF" /> : <Maximize size={14} color="#FFFFFF" />}
+      </TouchableOpacity>
     </View>
   );
 };
@@ -528,6 +615,24 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000000',
+  },
+  fullscreenBtn: {
+    position: 'absolute',
+    top: Platform.OS === 'android' ? 84 : 60,
+    left: 16,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 50,
+  },
+  fullscreenBtnFaint: {
+    top: Platform.OS === 'android' ? 40 : 50,
+    opacity: 0.55,
   },
   permissionContainer: {
     flex: 1,
@@ -585,8 +690,8 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
   },
   hudIconBtn: {
-    width: 40,
-    height: 40,
+    width: 32,
+    height: 32,
     borderRadius: 20,
     backgroundColor: 'rgba(15, 23, 42, 0.75)',
     alignItems: 'center',
@@ -649,8 +754,8 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   hudCircleBtn: {
-    width: 46,
-    height: 46,
+    width: 36,
+    height: 36,
     borderRadius: 23,
     backgroundColor: 'rgba(15, 23, 42, 0.8)',
     alignItems: 'center',

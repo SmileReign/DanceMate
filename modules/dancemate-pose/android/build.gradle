@@ -1,0 +1,29 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.dancematepose'
+version = '1.0.0'
+
+android {
+  namespace "expo.modules.dancematepose"
+  defaultConfig {
+    versionCode 1
+    versionName "1.0.0"
+    // Applied to the app's release build so code shrinking keeps MediaPipe intact.
+    consumerProguardFiles "proguard-rules.pro"
+  }
+}
+
+dependencies {
+  // Same CameraX version as expo-camera so both share one copy.
+  def camerax_version = "1.6.0"
+  implementation "androidx.camera:camera-core:${camerax_version}"
+  implementation "androidx.camera:camera-camera2:${camerax_version}"
+  implementation "androidx.camera:camera-lifecycle:${camerax_version}"
+  implementation "androidx.camera:camera-view:${camerax_version}"
+
+  // Google MediaPipe pose landmarker (33 body landmarks, GPU accelerated).
+  implementation "com.google.mediapipe:tasks-vision:0.10.35"
+}

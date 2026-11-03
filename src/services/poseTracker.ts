@@ -2,6 +2,12 @@ import { Platform } from 'react-native';
 import { Landmark, PoseFrame, CandidateDancer } from '../types/dance';
 import { POSE_LANDMARKS } from '../constants/skeletonJoints';
 import { SkeletonOneEuroFilter } from './oneEuroFilter';
+import {
+  NativePose,
+  flatToLandmarks,
+  flatToWorldLandmarks,
+  type VideoFrameResult,
+} from '../../modules/dancemate-pose';
 
 export interface TrackerProgressCallback {
   (progress: number, currentFrame: PoseFrame | null, statusText: string): void;
@@ -809,6 +815,205 @@ class PoseTrackerService {
 
     trackedFrames.sort((a, b) => a.timestamp - b.timestamp);
     return trackedFrames;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Android: on-device MediaPipe tracking (native module)
+  // ---------------------------------------------------------------------------
+
+  /** Finds every dancer in one frame of an uploaded video (Android native). */
+  async detectCandidatesNative(
+    videoUri: string,
+    timestampSec: number
+  ): Promise<{ candidates: CandidateDancer[]; width: number; height: number }> {
+    const result = await NativePose.detectPosesInVideoFrame(videoUri, timestampSec, 4);
+    const poses = result.poses
+      .map((p) => flatToLandmarks(p.landmarks))
+      .filter((p) => p !== null) as Landmark[][];
+    return {
+      candidates: this.processRawPosesToCandidates(poses),
+      width: result.width,
+      height: result.height,
+    };
+  }
+
+  /**
+   * Tracks every frame of an uploaded video on the phone (Android native), then follows the
+   * selected dancer from frame to frame. Frames where the dancer is not visible are left out
+   * instead of being guessed.
+   */
+  async trackReferenceVideoNative(
+    videoUri: string,
+    onProgress: TrackerProgressCallback,
+    isCancelledRef: { current: boolean },
+    targetDancer: CandidateDancer | null | undefined,
+    startTime: number,
+    endTime: number,
+    dancerCount: number,
+    targetFps: number = 30
+  ): Promise<{ frames: PoseFrame[]; width: number; height: number }> {
+    const cancelWatcher = setInterval(() => {
+      if (isCancelledRef.current) NativePose.cancelVideoAnalysis();
+    }, 150);
+
+    let result;
+    try {
+      onProgress(0, null, 'Starting on-device pose analysis...');
+      result = await NativePose.analyzeVideo(
+        videoUri,
+        {
+          startMs: Math.max(0, startTime * 1000),
+          endMs: endTime > startTime ? endTime * 1000 : 0,
+          fps: targetFps,
+          // Track exactly as many people as were found, so a solo video stays locked on one dancer.
+          numPoses: Math.max(1, Math.min(4, dancerCount)),
+          model: 'heavy',
+          maxDimension: 960,
+        },
+        (p) => {
+          const pct = Math.min(99, Math.round(p.progress * 100));
+          onProgress(
+            pct,
+            null,
+            `Tracking frame ${p.processedFrames} • ${(p.timeMs / 1000).toFixed(1)}s • ${pct}%`
+          );
+        }
+      );
+    } finally {
+      clearInterval(cancelWatcher);
+    }
+
+    if (result.cancelled || isCancelledRef.current) {
+      return { frames: [], width: result.width, height: result.height };
+    }
+
+    const frames = this.followDancer(result.frames, targetDancer);
+    console.log(
+      `[PoseTracker] Native analysis: ${frames.length}/${result.frames.length} frames with dancer, ` +
+        `delegate=${result.delegate}, decoder=${result.decoder}, ${(result.elapsedMs / 1000).toFixed(1)}s`
+    );
+    onProgress(100, frames[frames.length - 1] ?? null, `Tracked ${frames.length} frames`);
+    return { frames, width: result.width, height: result.height };
+  }
+
+  /** Picks the same dancer in every frame using position, body size and motion continuity. */
+  private followDancer(
+    rawFrames: VideoFrameResult[],
+    targetDancer: CandidateDancer | null | undefined
+  ): PoseFrame[] {
+    type Candidate = {
+      landmarks: Landmark[];
+      worldLandmarks?: Landmark[];
+      cx: number;
+      cy: number;
+      torso: number;
+      confidence: number;
+    };
+
+    const describe = (flat: number[], world?: number[] | null): Candidate | null => {
+      const lms = flatToLandmarks(flat) as Landmark[] | null;
+      if (!lms) return null;
+      const ls = lms[POSE_LANDMARKS.LEFT_SHOULDER];
+      const rs = lms[POSE_LANDMARKS.RIGHT_SHOULDER];
+      const lh = lms[POSE_LANDMARKS.LEFT_HIP];
+      const rh = lms[POSE_LANDMARKS.RIGHT_HIP];
+      const sx = (ls.x + rs.x) / 2;
+      const sy = (ls.y + rs.y) / 2;
+      const hx = (lh.x + rh.x) / 2;
+      const hy = (lh.y + rh.y) / 2;
+      const major = [0, 11, 12, 23, 24, 13, 14, 25, 26].map((i) => lms[i].visibility ?? 0);
+      return {
+        landmarks: lms,
+        worldLandmarks: flatToWorldLandmarks(world) as Landmark[] | undefined,
+        cx: (sx + hx) / 2,
+        cy: (sy + hy) / 2,
+        torso: Math.max(0.02, Math.hypot(sx - hx, sy - hy)),
+        confidence: major.reduce((a, b) => a + b, 0) / major.length,
+      };
+    };
+
+    const out: PoseFrame[] = [];
+    // A solo video never needs dancer matching: the one detected person is the dancer.
+    const isMultiPerson = rawFrames.some((f) => f.poses.length > 1);
+    let locked = false;
+    // Aim at the chosen dancer's torso (the same point used for every frame below).
+    const target = targetDancer?.sampleLandmarks
+      ? describe(
+          targetDancer.sampleLandmarks.flatMap((l) => [l.x, l.y, l.z ?? 0, l.visibility ?? 1]),
+          null
+        )
+      : null;
+    let cx = target?.cx ?? targetDancer?.cx ?? 0.5;
+    let cy = target?.cy ?? targetDancer?.cy ?? 0.5;
+    let vx = 0;
+    let vy = 0;
+    let torso = 0.2;
+    let lastT = rawFrames.length > 0 ? rawFrames[0].t : 0;
+    let misses = 0;
+
+    for (const frame of rawFrames) {
+      const cands = frame.poses
+        .map((p) => describe(p.landmarks, p.worldLandmarks))
+        .filter((c): c is Candidate => c !== null);
+
+      let chosen: Candidate | null = null;
+      if (cands.length === 1 && !isMultiPerson) {
+        chosen = cands[0];
+      } else if (cands.length > 0) {
+        const dt = Math.max(0.001, frame.t - lastT);
+        const px = locked ? cx + vx * dt : cx;
+        const py = locked ? cy + vy * dt : cy;
+        let best = Infinity;
+        for (const c of cands) {
+          const dist = Math.hypot(c.cx - px, c.cy - py);
+          const scale = locked ? Math.abs(c.torso - torso) / Math.max(0.05, torso) : 0;
+          const cost = dist * 2.2 + scale * 0.9 + (1 - c.confidence) * 0.4;
+          // Before locking on, only accept someone close to the dancer the user picked, so a
+          // neighbour is never followed just because the chosen dancer was missed in frame one.
+          const maxDist = locked
+            ? 0.35 + misses * 0.05
+            : targetDancer && isMultiPerson
+            ? 0.18 + misses * 0.01
+            : Infinity;
+          if (dist <= maxDist && cost < best) {
+            best = cost;
+            chosen = c;
+          }
+        }
+      }
+
+      if (!chosen) {
+        misses++;
+        vx *= 0.8;
+        vy *= 0.8;
+        continue;
+      }
+
+      const dt = Math.max(0.001, frame.t - lastT);
+      if (locked && misses < 3) {
+        vx = vx * 0.5 + ((chosen.cx - cx) / dt) * 0.5;
+        vy = vy * 0.5 + ((chosen.cy - cy) / dt) * 0.5;
+      } else {
+        vx = 0;
+        vy = 0;
+      }
+      cx = chosen.cx;
+      cy = chosen.cy;
+      torso = locked ? torso * 0.8 + chosen.torso * 0.2 : chosen.torso;
+      locked = true;
+      misses = 0;
+      lastT = frame.t;
+
+      out.push({
+        timestamp: frame.t,
+        landmarks: chosen.landmarks,
+        worldLandmarks: chosen.worldLandmarks,
+        confidence: parseFloat(chosen.confidence.toFixed(3)),
+        trackingQuality: chosen.confidence >= 0.75 ? 'high' : chosen.confidence >= 0.5 ? 'medium' : 'low',
+      });
+    }
+
+    return out;
   }
 
   detectLiveFrame(videoElement: HTMLVideoElement | any, timestampMs: number): Landmark[] | null {

@@ -4,10 +4,20 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  SafeAreaView,
-  Platform,
+  ScrollView,
+  BackHandler,
+  Pressable,
+  useWindowDimensions,
 } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  ChevronLeft,
+  CircleAlert,
+  CircleCheck,
+  Maximize,
+  RefreshCw,
+} from 'lucide-react-native';
 import {
   DanceProject,
   Landmark,
@@ -15,185 +25,430 @@ import {
   ChoreographySection,
   ComparisonResult,
   AlignmentSettings,
+  ReferencePlayback,
+  BodyFocus,
 } from '../types/dance';
 import { GhostOverlayView } from '../components/GhostOverlayView';
 import { SideBySideView } from '../components/SideBySideView';
 import { SideReferenceView } from '../components/SideReferenceView';
-import { PlaybackControls } from '../components/PlaybackControls';
-import { SectionEditor } from '../components/SectionEditor';
-import { ScoreBadge } from '../components/ScoreBadge';
 import { DanceVideoPlayerRef } from '../components/DanceVideoPlayer';
-import {
-  getInterpolatedPose,
-  compareDancerPoses,
-  flipLandmarks,
-} from '../services/motionComparison';
+import { AccuracyPanel } from '../components/practice/AccuracyPanel';
+import { AlignmentPanel } from '../components/practice/AlignmentPanel';
+import { StepsPanel } from '../components/practice/StepsPanel';
+import { PracticeDock } from '../components/practice/PracticeDock';
+import { FullscreenControls } from '../components/practice/FullscreenControls';
+import { SettingsSheet } from '../components/practice/SettingsSheet';
+import { LoopSheet, LoopRange } from '../components/practice/LoopSheet';
+import { CountsPanel, CountBadge } from '../components/practice/CountsPanel';
+import { addCount, autoFillCounts, barRanges, countAt } from '../services/danceCounts';
+import { P, cardStyle, scoreColor } from '../components/practice/practiceTheme';
+import { getInterpolatedPose, compareDancerPoses, flipLandmarks } from '../services/motionComparison';
 import { StorageService } from '../services/storageService';
-import { THEME } from '../constants/theme';
-import { ChevronLeft, Edit3 } from 'lucide-react-native';
+import { isNativePoseAvailable, NativePose } from '../../modules/dancemate-pose';
 
 interface PracticeScreenProps {
   project: DanceProject;
   onBackToLibrary: () => void;
-  onOpenTrackingStage: (project: DanceProject) => void;
+  onOpenTrackingStage: (project: DanceProject, options?: { reanalyze?: boolean }) => void;
 }
+
+const nowMs = () => Date.now();
+
+const DEFAULT_ALIGNMENT: AlignmentSettings = { scale: 1.0, offsetX: 0, offsetY: 0 };
+
+const QUALITY_LABEL: Record<ComparisonResult['trackingQuality'], string> = {
+  excellent: 'Perfect match',
+  good: 'Great',
+  fair: 'Keep going',
+  poor: 'Off the move',
+  lost: 'Tracking lost',
+};
 
 export const PracticeScreen: React.FC<PracticeScreenProps> = ({
   project,
   onBackToLibrary,
   onOpenTrackingStage,
 }) => {
-  // Project settings
+  const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
+
+  // --- Project & playback ---------------------------------------------------
   const [currentProject, setCurrentProject] = useState<DanceProject>(project);
   const [viewMode, setViewMode] = useState<ViewMode>('ghost');
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(project.trimStart ?? 0);
-  const [duration, setDuration] = useState(project.videoDuration || 15);
+  const [duration, setDuration] = useState(project.videoDuration || 0);
   const [playbackSpeed, setPlaybackSpeed] = useState(project.playbackSpeed || 1.0);
   const [isFlipped, setIsFlipped] = useState(project.flipReference || false);
-  const [ghostOpacity, setGhostOpacity] = useState(project.ghostOpacity || 0.65);
-  const [alignment, setAlignment] = useState<AlignmentSettings>(
-    project.alignment || { scale: 1.0, offsetX: 0, offsetY: 0 }
-  );
-
-  const insets = useSafeAreaInsets();
-  const safeTop = Math.max(insets.top + 28, Platform.OS === 'android' ? 52 : 40);
-
-  // Camera & Live Tracking
+  const [ghostOpacity, setGhostOpacity] = useState(project.ghostOpacity || 0.6);
+  const [alignment, setAlignment] = useState<AlignmentSettings>(project.alignment || DEFAULT_ALIGNMENT);
   const [cameraFacing, setCameraFacing] = useState<'front' | 'back'>('front');
   const [liveLandmarks, setLiveLandmarks] = useState<Landmark[] | null>(null);
+  const [showMySkeleton, setShowMySkeleton] = useState(true);
+  const [showVideoSkeleton, setShowVideoSkeleton] = useState(true);
+  // Show only the upper (handwork) or lower (footwork) half of the reference dancer.
+  const [bodyFocus, setBodyFocus] = useState<BodyFocus>('full');
 
-  // Sections & Looping
-  const [sections, setSections] = useState<ChoreographySection[]>(project.sections || []);
-  const [activeSectionId, setActiveSectionId] = useState<string | null>(null);
-  const [isLooping, setIsLooping] = useState(false);
-  const [repeatTarget, setRepeatTarget] = useState(0); // 0 = infinite
-  const [repeatCount, setRepeatCount] = useState(0);
-
-  // Manual Practice Recording (Not automatic)
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingDuration, setRecordingDuration] = useState(0);
-  const recordingTimerRef = useRef<any>(null);
-
-  // Video player imperative reference
+  // Your skeleton is drawn natively on the camera frame; JS only needs landmarks for scoring,
+  // so update them ~12 times a second instead of re-rendering the screen on every frame.
+  const lastLiveUpdateRef = useRef(0);
+  const hadLiveRef = useRef(false);
+  const handleLiveLandmarks = useCallback((lms: Landmark[] | null) => {
+    const now = Date.now();
+    const has = !!lms;
+    if (has !== hadLiveRef.current || now - lastLiveUpdateRef.current > 80) {
+      hadLiveRef.current = has;
+      lastLiveUpdateRef.current = now;
+      setLiveLandmarks(lms);
+    }
+  }, []);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  // In full screen everything is hidden; a tap shows small controls for a few seconds.
+  const [showFsControls, setShowFsControls] = useState(false);
+  const fsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const revealFsControls = () => {
+    setShowFsControls(true);
+    if (fsHideTimer.current) clearTimeout(fsHideTimer.current);
+    fsHideTimer.current = setTimeout(() => setShowFsControls(false), 4000);
+  };
+  useEffect(() => () => {
+    if (fsHideTimer.current) clearTimeout(fsHideTimer.current);
+  }, []);
+  const [showSettings, setShowSettings] = useState(false);
   const videoPlayerRef = useRef<DanceVideoPlayerRef | null>(null);
 
-  // Interpolated reference landmarks for current playback timestamp
+  // --- Steps ------------------------------------------------------------------
+  const [steps, setSteps] = useState<ChoreographySection[]>(project.sections || []);
+  const [activeStepId, setActiveStepId] = useState<string | null>(null);
+  const [repeatTarget, setRepeatTarget] = useState(3); // 0 = forever
+  const [repeatCount, setRepeatCount] = useState(0);
+  const [autoAdvance, setAutoAdvance] = useState(true);
+  const [loopWhole, setLoopWhole] = useState(true);
+
+  // --- Custom loop (any section, repeated N times; 0 = until stopped) -------------
+  const [customLoop, setCustomLoop] = useState<LoopRange | null>(null);
+  const [loopTarget, setLoopTarget] = useState(0);
+  const [loopCount, setLoopCount] = useState(0);
+  const [showLoopSheet, setShowLoopSheet] = useState(false);
+
+  // --- Dance counts (tapped by the user on every beat) ------------------------------
+  const [counts, setCounts] = useState<number[]>(project.counts ?? []);
+  const [countsPerBar, setCountsPerBar] = useState(project.countsPerBar ?? 8);
+  const [showCountsOnScreen, setShowCountsOnScreen] = useState(true);
+  const tappedRef = useRef<number[]>([]); // counts added by tapping, newest last (for Undo)
+
+  // --- Recording --------------------------------------------------------------
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
+  const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Real video size, so the reference skeleton lines up with the letterboxed video.
+  const [videoSize, setVideoSize] = useState<{ width: number; height: number } | undefined>(
+    project.videoWidth && project.videoHeight
+      ? { width: project.videoWidth, height: project.videoHeight }
+      : undefined
+  );
+  useEffect(() => {
+    if (!isNativePoseAvailable || !project.videoUri) return;
+    let mounted = true;
+    NativePose.getVideoInfo(project.videoUri)
+      .then((info) => {
+        if (!mounted) return;
+        if (info.width > 0 && info.height > 0) setVideoSize({ width: info.width, height: info.height });
+        if (info.durationMs > 0) setDuration(info.durationMs / 1000);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [project.videoUri]);
+
+  // Practice range = the trimmed routine (or the whole video).
+  const rangeStart = currentProject.trimStart ?? 0;
+  const rangeEnd =
+    currentProject.trimEnd !== undefined && currentProject.trimEnd > rangeStart + 1
+      ? currentProject.trimEnd
+      : Math.max(rangeStart + 0.1, duration);
+
+  // --- Live comparison --------------------------------------------------------
   let referenceLandmarks = getInterpolatedPose(currentProject.poseData, currentTime);
-  if (referenceLandmarks && isFlipped) {
-    referenceLandmarks = flipLandmarks(referenceLandmarks);
-  }
-
-  // Real-time Pose Comparison
+  if (referenceLandmarks && isFlipped) referenceLandmarks = flipLandmarks(referenceLandmarks);
   const comparison: ComparisonResult = compareDancerPoses(liveLandmarks, referenceLandmarks);
+  const isTracking = !!liveLandmarks;
+  const score = isTracking ? Math.round(comparison.overallScore) : 0;
 
-  // Handle Playback Status Update
+  // Live accuracy trend (last ~12s) and session average while the dance plays.
+  const scoreRef = useRef({ score, isTracking, isPlaying });
+  useEffect(() => {
+    scoreRef.current = { score, isTracking, isPlaying };
+  });
+  const [history, setHistory] = useState<number[]>([]);
+  const [average, setAverage] = useState<number | null>(null);
+  const sumRef = useRef({ total: 0, n: 0 });
+  useEffect(() => {
+    const id = setInterval(() => {
+      const cur = scoreRef.current;
+      if (!cur.isPlaying) return;
+      const v = cur.isTracking ? cur.score : 0;
+      setHistory((h) => (h.length >= 40 ? [...h.slice(1), v] : [...h, v]));
+      if (cur.isTracking) {
+        sumRef.current.total += v;
+        sumRef.current.n += 1;
+        setAverage(Math.round(sumRef.current.total / sumRef.current.n));
+      }
+    }, 300);
+    return () => clearInterval(id);
+  }, []);
+
+  const reference: ReferencePlayback = {
+    poseData: currentProject.poseData,
+    flip: isFlipped,
+    currentTime,
+    isPlaying,
+    rate: playbackSpeed,
+    videoSize,
+  };
+
+  // --- Playback control ---------------------------------------------------------
+  const seekTo = useCallback(async (seconds: number) => {
+    setCurrentTime(seconds);
+    await videoPlayerRef.current?.setPositionAsync(seconds * 1000);
+  }, []);
+
+  // Latest values for the playback callback (avoids stale closures between video events).
+  const loopState = useRef({
+    steps, activeStepId, repeatTarget, repeatCount, autoAdvance, loopWhole, rangeStart, rangeEnd,
+    customLoop, loopTarget, loopCount,
+  });
+  useEffect(() => {
+    loopState.current = {
+      steps, activeStepId, repeatTarget, repeatCount, autoAdvance, loopWhole, rangeStart, rangeEnd,
+      customLoop, loopTarget, loopCount,
+    };
+  });
+  const lastLoopAtRef = useRef(0);
+
   const handlePlaybackUpdate = useCallback(
     (pos: number, dur: number) => {
       setCurrentTime(pos);
-      if (dur > 0 && Math.abs(duration - dur) > 1) {
-        setDuration(dur);
-      }
+      if (dur > 0) setDuration((d) => (Math.abs(d - dur) > 0.05 ? dur : d));
 
-      // Check section boundary loop
-      if (isLooping && activeSectionId) {
-        const activeSec = sections.find((s) => s.id === activeSectionId);
-        if (activeSec && pos >= activeSec.endTime) {
-          // Check repeat count
-          if (repeatTarget > 0 && repeatCount + 1 >= repeatTarget) {
-            // Reached target repetitions
+      const s = loopState.current;
+      const now = Date.now();
+      if (now - lastLoopAtRef.current < 400) return; // a seek is still settling
+
+      // A loop picked in the Loop panel wins over steps and the whole routine.
+      const loop = s.customLoop;
+      if (loop) {
+        if (pos >= loop.end - 0.05) {
+          lastLoopAtRef.current = now;
+          const done = s.loopCount + 1;
+          if (s.loopTarget > 0 && done >= s.loopTarget) {
+            // All repetitions played: stop at the start of the section, ready to go again.
+            setLoopCount(0);
             videoPlayerRef.current?.pauseAsync();
             setIsPlaying(false);
-            setRepeatCount(0);
           } else {
-            // Seek back to start of section
-            setRepeatCount((prev) => prev + 1);
-            videoPlayerRef.current?.setPositionAsync(activeSec.startTime * 1000);
+            setLoopCount(done);
+          }
+          seekTo(loop.start);
+        }
+        return;
+      }
+
+      const step = s.activeStepId ? s.steps.find((x) => x.id === s.activeStepId) : null;
+      if (step) {
+        if (pos >= step.endTime - 0.05) {
+          lastLoopAtRef.current = now;
+          const done = s.repeatCount + 1;
+          if (s.repeatTarget > 0 && done >= s.repeatTarget) {
+            const ordered = [...s.steps].sort((a, b) => a.startTime - b.startTime);
+            const next = ordered[ordered.findIndex((x) => x.id === step.id) + 1];
+            if (s.autoAdvance && next) {
+              setActiveStepId(next.id);
+              setRepeatCount(0);
+              seekTo(next.startTime);
+            } else {
+              // Finished this step's repetitions.
+              setRepeatCount(0);
+              videoPlayerRef.current?.pauseAsync();
+              setIsPlaying(false);
+              seekTo(step.startTime);
+            }
+          } else {
+            setRepeatCount(done);
+            seekTo(step.startTime);
           }
         }
-      } else if (isLooping && pos >= (currentProject.trimEnd !== undefined && currentProject.trimEnd > 0 ? currentProject.trimEnd : dur - 0.2)) {
-        // Loop back to start of trimmed dance routine or 0
-        videoPlayerRef.current?.setPositionAsync((currentProject.trimStart ?? 0) * 1000);
+        return;
+      }
+
+      if (dur > 0 && pos >= s.rangeEnd - 0.08) {
+        lastLoopAtRef.current = now;
+        if (s.loopWhole) {
+          seekTo(s.rangeStart);
+        } else {
+          videoPlayerRef.current?.pauseAsync();
+          setIsPlaying(false);
+        }
       }
     },
-    [isLooping, activeSectionId, sections, repeatTarget, repeatCount, duration, currentProject.trimStart, currentProject.trimEnd]
+    [seekTo]
   );
 
-  // Seek video player to trimStart on initial mount if video was trimmed
+  // Start at the beginning of the trimmed routine.
   useEffect(() => {
-    if (currentProject.trimStart && currentProject.trimStart > 0) {
-      videoPlayerRef.current?.setPositionAsync(currentProject.trimStart * 1000);
+    if (project.trimStart && project.trimStart > 0) {
+      videoPlayerRef.current?.setPositionAsync(project.trimStart * 1000);
     }
-  }, [currentProject.trimStart]);
+  }, [project.trimStart]);
 
-  // Controls Handlers
   const handlePlayPause = async () => {
     if (isPlaying) {
       await videoPlayerRef.current?.pauseAsync();
       setIsPlaying(false);
     } else {
+      if (customLoop) {
+        if (currentTime >= customLoop.end - 0.15 || currentTime < customLoop.start - 0.05) {
+          lastLoopAtRef.current = Date.now();
+          await seekTo(customLoop.start);
+        }
+      } else if (currentTime >= rangeEnd - 0.15 || currentTime < rangeStart) {
+        await seekTo(rangeStart);
+      }
       await videoPlayerRef.current?.playAsync();
       setIsPlaying(true);
     }
   };
 
-  const handleSeek = async (seconds: number) => {
-    setCurrentTime(seconds);
-    await videoPlayerRef.current?.setPositionAsync(seconds * 1000);
-  };
-
   const handleSpeedChange = async (speed: number) => {
     setPlaybackSpeed(speed);
     await videoPlayerRef.current?.setRateAsync(speed);
-    // Update project state
-    setCurrentProject((prev) => ({ ...prev, playbackSpeed: speed }));
-  };
-
-  const handleToggleFlip = () => {
-    const next = !isFlipped;
-    setIsFlipped(next);
-    setCurrentProject((prev) => ({ ...prev, flipReference: next }));
   };
 
   const handleReset = async () => {
-    // Reset playback position
-    const activeSec = sections.find((s) => s.id === activeSectionId);
-    const targetTime = activeSec ? activeSec.startTime : (currentProject.trimStart ?? 0);
-    setCurrentTime(targetTime);
-    await videoPlayerRef.current?.setPositionAsync(targetTime * 1000);
-
-    // Reset alignment
-    const defaultAlign: AlignmentSettings = { scale: 1.0, offsetX: 0, offsetY: 0 };
-    setAlignment(defaultAlign);
+    const step = steps.find((s) => s.id === activeStepId);
     setRepeatCount(0);
+    setLoopCount(0);
+    await seekTo(customLoop ? customLoop.start : step ? step.startTime : rangeStart);
   };
 
-  const handleSwitchCamera = () => {
-    setCameraFacing((prev) => (prev === 'front' ? 'back' : 'front'));
+  const handleSelectStep = async (step: ChoreographySection | null) => {
+    setRepeatCount(0);
+    lastLoopAtRef.current = Date.now();
+    if (step) {
+      setCustomLoop(null); // a step drill replaces the custom loop
+      setActiveStepId(step.id);
+      await seekTo(step.startTime);
+      await videoPlayerRef.current?.playAsync();
+      setIsPlaying(true);
+    } else {
+      setActiveStepId(null);
+    }
   };
 
-  // Manual Practice Recording
+  // --- Loop panel -------------------------------------------------------------------
+  const handleStartLoop = async (range: LoopRange, target: number) => {
+    setShowLoopSheet(false);
+    setActiveStepId(null);
+    setRepeatCount(0);
+    setCustomLoop(range);
+    setLoopTarget(target);
+    setLoopCount(0);
+    lastLoopAtRef.current = Date.now();
+    await seekTo(range.start);
+    await videoPlayerRef.current?.playAsync();
+    setIsPlaying(true);
+  };
+
+  const handleStopLoop = () => {
+    setCustomLoop(null);
+    setLoopCount(0);
+    setShowLoopSheet(false);
+  };
+
+  // --- Counts -----------------------------------------------------------------------
+  const handleTapCount = () => {
+    if (!isPlaying) {
+      // First press starts the music; the following taps mark the beats.
+      handlePlayPause();
+      return;
+    }
+    const t = videoPlayerRef.current?.getCurrentTime() ?? currentTime;
+    tappedRef.current.push(+t.toFixed(3));
+    setCounts((c) => addCount(c, t));
+  };
+
+  const handleUndoCount = () => {
+    const last = tappedRef.current.pop();
+    setCounts((c) => {
+      if (last === undefined) return c.slice(0, -1);
+      let idx = -1;
+      let best = Infinity;
+      c.forEach((v, i) => {
+        const d = Math.abs(v - last);
+        if (d < best) {
+          best = d;
+          idx = i;
+        }
+      });
+      return idx >= 0 && best < 0.2 ? c.filter((_, i) => i !== idx) : c.slice(0, -1);
+    });
+  };
+
+  const handleStepsFromCounts = () => {
+    const bars = barRanges(counts, countsPerBar, rangeEnd);
+    if (bars.length === 0) return;
+    const word = countsPerBar === 8 ? 'Eight' : 'Phrase';
+    handleChangeSteps(
+      bars.map((b, i) => ({
+        id: `count_${Date.now()}_${i}`,
+        name: `${word} ${i + 1}`,
+        startTime: b.start,
+        endTime: b.end,
+      }))
+    );
+  };
+
+  // Save counts shortly after the user stops tapping (saving on every tap would be slow).
+  const countsChangedRef = useRef(false);
+  useEffect(() => {
+    if (!countsChangedRef.current) {
+      countsChangedRef.current = true;
+      return;
+    }
+    const id = setTimeout(() => {
+      StorageService.saveProject({ ...currentProject, sections: steps, counts, countsPerBar });
+    }, 1500);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [counts, countsPerBar]);
+
+  const countPosition = countAt(counts, currentTime, countsPerBar);
+
+  const handleChangeSteps = async (next: ChoreographySection[]) => {
+    setSteps(next);
+    const updated = { ...currentProject, sections: next };
+    setCurrentProject(updated);
+    await StorageService.saveProject(updated);
+  };
+
   const handleToggleRecord = () => {
     if (isRecording) {
-      // Stop recording
       setIsRecording(false);
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
-      // Save practice recording session
       StorageService.savePracticeRecording({
-        id: `rec_${Date.now()}`,
+        id: `rec_${nowMs()}`,
         projectId: currentProject.id,
-        timestamp: Date.now(),
+        timestamp: nowMs(),
         duration: recordingDuration,
         averageScore: comparison.overallScore,
       });
       setRecordingDuration(0);
     } else {
-      // Start recording
       setIsRecording(true);
       setRecordingDuration(0);
-      recordingTimerRef.current = setInterval(() => {
-        setRecordingDuration((prev) => prev + 1);
-      }, 1000);
+      recordingTimerRef.current = setInterval(() => setRecordingDuration((p) => p + 1), 1000);
     }
   };
 
@@ -203,257 +458,446 @@ export const PracticeScreen: React.FC<PracticeScreenProps> = ({
     };
   }, []);
 
-  // Section handling
-  const handleSelectSection = async (section: ChoreographySection | null) => {
-    if (section) {
-      setActiveSectionId(section.id);
-      setIsLooping(true);
-      setRepeatCount(0);
-      setCurrentTime(section.startTime);
-      await videoPlayerRef.current?.setPositionAsync(section.startTime * 1000);
-    } else {
-      setActiveSectionId(null);
-      setIsLooping(false);
-      setRepeatCount(0);
-    }
-  };
+  // Android back button leaves full screen first.
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setIsFullscreen(false);
+      setShowFsControls(false);
+      return true;
+    });
+    return () => sub.remove();
+  }, [isFullscreen]);
 
-  const handleAddSection = async (section: ChoreographySection) => {
-    const updatedSections = [...sections, section];
-    setSections(updatedSections);
-    const updated = { ...currentProject, sections: updatedSections };
-    setCurrentProject(updated);
-    await StorageService.saveProject(updated);
-  };
-
-  const handleDeleteSection = async (sectionId: string) => {
-    const updatedSections = sections.filter((s) => s.id !== sectionId);
-    setSections(updatedSections);
-    if (activeSectionId === sectionId) setActiveSectionId(null);
-    const updated = { ...currentProject, sections: updatedSections };
-    setCurrentProject(updated);
-    await StorageService.saveProject(updated);
-  };
-
-  // Save changes on unmount or navigation
   const persistCurrentProject = async () => {
-    const updated: DanceProject = {
+    await StorageService.saveProject({
       ...currentProject,
       playbackSpeed,
       flipReference: isFlipped,
       ghostOpacity,
       alignment,
-      sections,
-    };
-    await StorageService.saveProject(updated);
+      sections: steps,
+      counts,
+      countsPerBar,
+    });
   };
 
+  const handleReanalyze = async () => {
+    await persistCurrentProject();
+    onOpenTrackingStage(
+      { ...currentProject, flipReference: isFlipped, sections: steps, counts, countsPerBar },
+      { reanalyze: true }
+    );
+  };
+
+  const activeStep = steps.find((s) => s.id === activeStepId) || null;
+  const repsLabel = customLoop
+    ? loopTarget === 0
+      ? `Loop · Rep ${loopCount + 1}`
+      : `Loop · Rep ${Math.min(loopCount + 1, loopTarget)}/${loopTarget}`
+    : activeStep
+    ? repeatTarget === 0
+      ? `Rep ${repeatCount + 1}`
+      : `Rep ${Math.min(repeatCount + 1, repeatTarget)}/${repeatTarget}`
+    : '';
+
+  // --- Stage (kept in the same place in the tree so full screen never restarts camera/video) ---
+  const viewProps = {
+    sourceUri: currentProject.videoUri,
+    isPlaying,
+    playbackSpeed,
+    isFlipped,
+    cameraFacing,
+    reference,
+    liveLandmarks,
+    highlightJoints: comparison.highlightJoints,
+    videoPlayerRef,
+    onPlaybackUpdate: handlePlaybackUpdate,
+    onLiveLandmarksDetected: handleLiveLandmarks,
+    showLiveSkeleton: showMySkeleton,
+    showReferenceSkeleton: showVideoSkeleton,
+    bodyFocus,
+  };
+
+  const stageHeight = Math.round(windowHeight * 0.5);
+
   return (
-    <SafeAreaView style={styles.safeContainer}>
-      {/* 1. Header Bar */}
-      <View style={[styles.topHeader, { paddingTop: safeTop, height: 52 + safeTop }]}>
-        <TouchableOpacity
-          style={styles.backBtn}
-          onPress={async () => {
-            await persistCurrentProject();
-            onBackToLibrary();
-          }}
-          activeOpacity={0.8}
-          accessibilityLabel="Back"
-        >
-          <ChevronLeft size={20} color="#FFF" />
-          <Text style={styles.backText}>Back</Text>
-        </TouchableOpacity>
+    <View style={styles.root}>
+      <StatusBar hidden={isFullscreen} style="light" />
 
-        <View style={styles.headerTitleWrap}>
-          <Text style={styles.headerTitle} numberOfLines={1}>
-            {currentProject.title}
-          </Text>
-        </View>
-
-        <TouchableOpacity
-          style={styles.editRefBtn}
-          onPress={async () => {
-            await persistCurrentProject();
-            onOpenTrackingStage(currentProject);
-          }}
-        >
-          <Edit3 size={14} color="#FFF" />
-          <Text style={styles.editRefText}>Tracking</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* 2. Main Practice Stage Viewport */}
-      <View style={styles.stageViewport}>
+      {/* Stage */}
+      <View
+        collapsable={false}
+        style={
+          isFullscreen
+            ? styles.stageFullscreen
+            : [styles.stageCard, { height: stageHeight, marginTop: insets.top + 6 }]
+        }
+      >
         {viewMode === 'ghost' && (
-          <GhostOverlayView
-            sourceUri={currentProject.videoUri}
-            isPlaying={isPlaying}
-            playbackSpeed={playbackSpeed}
-            isFlipped={isFlipped}
-            ghostOpacity={ghostOpacity}
-            cameraFacing={cameraFacing}
-            referenceLandmarks={referenceLandmarks}
-            liveLandmarks={liveLandmarks}
-            highlightJoints={comparison.highlightJoints}
-            alignment={alignment}
-            videoPlayerRef={videoPlayerRef}
-            onPlaybackUpdate={handlePlaybackUpdate}
-            onLiveLandmarksDetected={setLiveLandmarks}
-            onChangeAlignment={setAlignment}
-            onResetAlignment={() => setAlignment({ scale: 1.0, offsetX: 0, offsetY: 0 })}
-          />
+          <GhostOverlayView {...viewProps} ghostOpacity={ghostOpacity} alignment={alignment} />
+        )}
+        {viewMode === 'sideBySide' && <SideBySideView {...viewProps} />}
+        {viewMode === 'sideReference' && <SideReferenceView {...viewProps} />}
+
+        {/* Current dance count */}
+        {showCountsOnScreen && counts.length > 0 && (
+          <CountBadge position={countPosition} countsPerBar={countsPerBar} top={isFullscreen ? insets.top + 8 : 8} />
         )}
 
-        {viewMode === 'sideBySide' && (
-          <SideBySideView
-            sourceUri={currentProject.videoUri}
-            isPlaying={isPlaying}
-            playbackSpeed={playbackSpeed}
-            isFlipped={isFlipped}
-            cameraFacing={cameraFacing}
-            referenceLandmarks={referenceLandmarks}
-            liveLandmarks={liveLandmarks}
-            highlightJoints={comparison.highlightJoints}
-            videoPlayerRef={videoPlayerRef}
-            onPlaybackUpdate={handlePlaybackUpdate}
-            onLiveLandmarksDetected={setLiveLandmarks}
-          />
+        {/* Stage HUD */}
+        {isFullscreen ? (
+          <>
+            {/* Tap anywhere to show the controls */}
+            <Pressable style={StyleSheet.absoluteFill} onPress={revealFsControls} />
+            <FullscreenControls
+              visible={!isPlaying || showFsControls}
+              topInset={insets.top}
+              bottomInset={insets.bottom}
+              isPlaying={isPlaying}
+              currentTime={currentTime}
+              rangeStart={rangeStart}
+              rangeEnd={rangeEnd}
+              steps={steps}
+              activeStepId={activeStepId}
+              stepLabel={customLoop ? repsLabel : activeStep ? `${activeStep.name} · ${repsLabel}` : null}
+              playbackSpeed={playbackSpeed}
+              viewMode={viewMode}
+              showMySkeleton={showMySkeleton}
+              showVideoSkeleton={showVideoSkeleton}
+              bodyFocus={bodyFocus}
+              isFlipped={isFlipped}
+              loopRange={customLoop}
+              ghostOpacity={ghostOpacity}
+              onBodyFocusChange={setBodyFocus}
+              onToggleFlip={() => setIsFlipped((f) => !f)}
+              onOpenLoop={() => setShowLoopSheet(true)}
+              onGhostOpacityChange={setGhostOpacity}
+              score={score}
+              history={history}
+              average={average}
+              arms={comparison.armsScore}
+              legs={comparison.legsScore}
+              torso={comparison.torsoScore}
+              isTracking={isTracking}
+              onPlayPause={handlePlayPause}
+              onSeek={seekTo}
+              onReset={handleReset}
+              onSpeedChange={handleSpeedChange}
+              onCycleViewMode={() =>
+                setViewMode((m) => (m === 'ghost' ? 'sideBySide' : m === 'sideBySide' ? 'sideReference' : 'ghost'))
+              }
+              onToggleMySkeleton={() => setShowMySkeleton((v) => !v)}
+              onToggleVideoSkeleton={() => setShowVideoSkeleton((v) => !v)}
+              onExit={() => {
+                setIsFullscreen(false);
+                setShowFsControls(false);
+              }}
+              onInteract={revealFsControls}
+            />
+          </>
+        ) : (
+          <>
+            <TouchableOpacity
+              style={[styles.miniBtn, styles.miniLeft]}
+              onPress={async () => {
+                await persistCurrentProject();
+                onBackToLibrary();
+              }}
+              hitSlop={10}
+              accessibilityLabel="Back"
+            >
+              <ChevronLeft size={15} color="#FFF" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.miniBtn, styles.miniRight]}
+              onPress={() => setIsFullscreen(true)}
+              hitSlop={10}
+              accessibilityLabel="Full screen"
+            >
+              <Maximize size={13} color="#FFF" />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.reanalyzeBtn}
+              onPress={handleReanalyze}
+              hitSlop={8}
+              accessibilityLabel="Re-analyze reference video"
+            >
+              <RefreshCw size={11} color="#FFF" />
+              <Text style={styles.reanalyzeText}>Re-analyze</Text>
+            </TouchableOpacity>
+            <View style={styles.scorePill} pointerEvents="none">
+              <Text style={[styles.scoreValue, { color: isTracking ? scoreColor(score) : P.textDim }]}>{score}%</Text>
+              <Text style={styles.scoreLabel}>
+                {isTracking ? QUALITY_LABEL[comparison.trackingQuality] : 'Step into frame'}
+              </Text>
+            </View>
+          </>
         )}
+      </View>
 
-        {viewMode === 'sideReference' && (
-          <SideReferenceView
-            sourceUri={currentProject.videoUri}
+      {/* Cards */}
+      {!isFullscreen && (
+        <ScrollView
+          style={styles.scroll}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          {viewMode === 'ghost' && (
+            <AlignmentPanel
+              alignment={alignment}
+              ghostOpacity={ghostOpacity}
+              onChange={setAlignment}
+              onGhostOpacityChange={setGhostOpacity}
+              onReset={() => setAlignment(DEFAULT_ALIGNMENT)}
+            />
+          )}
+
+          <AccuracyPanel comparison={comparison} isTracking={isTracking} history={history} average={average} />
+
+          <FeedbackCard isTracking={isTracking} comparison={comparison} hasReference={!!referenceLandmarks} />
+
+          <CountsPanel
+            counts={counts}
+            countsPerBar={countsPerBar}
             isPlaying={isPlaying}
-            playbackSpeed={playbackSpeed}
-            isFlipped={isFlipped}
-            cameraFacing={cameraFacing}
-            referenceLandmarks={referenceLandmarks}
-            liveLandmarks={liveLandmarks}
-            highlightJoints={comparison.highlightJoints}
-            videoPlayerRef={videoPlayerRef}
-            onPlaybackUpdate={handlePlaybackUpdate}
-            onLiveLandmarksDetected={setLiveLandmarks}
+            position={countPosition}
+            showOnScreen={showCountsOnScreen}
+            onTap={handleTapCount}
+            onUndo={handleUndoCount}
+            onClear={() => {
+              tappedRef.current = [];
+              setCounts([]);
+            }}
+            onAutoFill={() => setCounts((c) => autoFillCounts(c, rangeEnd))}
+            onMakeSteps={handleStepsFromCounts}
+            onPerBarChange={setCountsPerBar}
+            onToggleShowOnScreen={() => setShowCountsOnScreen((v) => !v)}
           />
-        )}
 
-        {/* Floating Compact Score Badge in Viewport Corner */}
-        <View style={styles.floatingScoreBadge}>
-          <ScoreBadge comparison={comparison} compact={true} />
+          <StepsPanel
+            steps={steps}
+            activeStepId={activeStepId}
+            repeatTarget={repeatTarget}
+            repeatCount={repeatCount}
+            autoAdvance={autoAdvance}
+            loopWhole={loopWhole}
+            currentTime={currentTime}
+            rangeStart={rangeStart}
+            rangeEnd={rangeEnd}
+            onSelectStep={handleSelectStep}
+            onChangeSteps={handleChangeSteps}
+            onRepeatTargetChange={(n) => {
+              setRepeatTarget(n);
+              setRepeatCount(0);
+            }}
+            onToggleAutoAdvance={() => setAutoAdvance((v) => !v)}
+            onOpenLoop={() => setShowLoopSheet(true)}
+            loopActive={!!customLoop}
+          />
+        </ScrollView>
+      )}
+
+      {/* Dock */}
+      {!isFullscreen && (
+        <View style={{ paddingBottom: insets.bottom + 8, backgroundColor: P.card }}>
+          <PracticeDock
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+            isPlaying={isPlaying}
+            currentTime={currentTime}
+            rangeStart={rangeStart}
+            rangeEnd={rangeEnd}
+            steps={steps}
+            activeStepId={activeStepId}
+            playbackSpeed={playbackSpeed}
+            isRecording={isRecording}
+            recordingDuration={recordingDuration}
+            onPlayPause={handlePlayPause}
+            onSeek={seekTo}
+            onReset={handleReset}
+            onSpeedChange={handleSpeedChange}
+            showMySkeleton={showMySkeleton}
+            showVideoSkeleton={showVideoSkeleton}
+            onToggleMySkeleton={() => setShowMySkeleton((v) => !v)}
+            onToggleVideoSkeleton={() => setShowVideoSkeleton((v) => !v)}
+            bodyFocus={bodyFocus}
+            onBodyFocusChange={setBodyFocus}
+            isFlipped={isFlipped}
+            onToggleFlip={() => setIsFlipped((f) => !f)}
+            loopRange={customLoop}
+            onOpenLoop={() => setShowLoopSheet(true)}
+            onFullscreen={() => setIsFullscreen(true)}
+            onOpenSettings={() => setShowSettings(true)}
+            onToggleRecord={handleToggleRecord}
+          />
         </View>
-      </View>
+      )}
 
-      {/* 3. Detailed Real-Time Comparison Score Bar */}
-      <View style={styles.scoreSection}>
-        <ScoreBadge comparison={comparison} compact={false} />
-      </View>
-
-      {/* 4. Timeline Section Looping Bar */}
-      <SectionEditor
-        sections={sections}
-        activeSectionId={activeSectionId}
-        currentTime={currentTime}
-        duration={duration}
-        isLooping={isLooping}
-        repeatTarget={repeatTarget}
-        repeatCount={repeatCount}
-        onSelectSection={handleSelectSection}
-        onAddSection={handleAddSection}
-        onDeleteSection={handleDeleteSection}
-        onToggleLoop={() => setIsLooping(!isLooping)}
-        onSetRepeatTarget={setRepeatTarget}
-      />
-
-      {/* 5. Playback & Mode Controls */}
-      <PlaybackControls
-        isPlaying={isPlaying}
-        currentTime={currentTime}
-        duration={duration}
-        playbackSpeed={playbackSpeed}
-        isFlipped={isFlipped}
+      <SettingsSheet
+        visible={showSettings}
         cameraFacing={cameraFacing}
-        isRecording={isRecording}
-        recordingDuration={recordingDuration}
-        viewMode={viewMode}
-        ghostOpacity={ghostOpacity}
-        onPlayPause={handlePlayPause}
-        onSeek={handleSeek}
-        onSpeedChange={handleSpeedChange}
-        onToggleFlip={handleToggleFlip}
-        onReset={handleReset}
-        onSwitchCamera={handleSwitchCamera}
-        onToggleRecord={handleToggleRecord}
-        onViewModeChange={setViewMode}
-        onGhostOpacityChange={setGhostOpacity}
+        onSwitchCamera={() => setCameraFacing((f) => (f === 'front' ? 'back' : 'front'))}
+        isFlipped={isFlipped}
+        onToggleFlip={() => setIsFlipped((f) => !f)}
+        onEditTracking={async () => {
+          await persistCurrentProject();
+          onOpenTrackingStage({ ...currentProject, flipReference: isFlipped, sections: steps, counts, countsPerBar });
+        }}
+        onReanalyze={handleReanalyze}
+        onClose={() => setShowSettings(false)}
       />
-    </SafeAreaView>
+
+      <LoopSheet
+        visible={showLoopSheet}
+        rangeStart={rangeStart}
+        rangeEnd={rangeEnd}
+        currentTime={currentTime}
+        steps={steps}
+        counts={counts}
+        countsPerBar={countsPerBar}
+        activeLoop={customLoop}
+        repeatTarget={loopTarget}
+        loopCount={loopCount}
+        loopWhole={loopWhole}
+        onStart={handleStartLoop}
+        onStop={handleStopLoop}
+        onToggleLoopWhole={() => setLoopWhole((v) => !v)}
+        onPreviewSeek={(t) => {
+          lastLoopAtRef.current = Date.now();
+          seekTo(t);
+        }}
+        onClose={() => setShowLoopSheet(false)}
+      />
+    </View>
+  );
+};
+
+const FeedbackCard: React.FC<{ isTracking: boolean; comparison: ComparisonResult; hasReference: boolean }> = ({
+  isTracking,
+  comparison,
+  hasReference,
+}) => {
+  let good = false;
+  let title: string;
+  let body: string;
+  if (!isTracking) {
+    title = 'Dancer out of frame.';
+    body = 'Step back so your whole body, head to feet, is in the camera view. Keep the phone steady.';
+  } else if (!hasReference) {
+    title = 'Press play to start.';
+    body = 'Your moves are compared with the reference dancer while the video plays.';
+  } else {
+    good = comparison.overallScore >= 70;
+    title = good ? 'Nice — you are in sync!' : 'Adjust your moves.';
+    body = comparison.feedbackMessage;
+  }
+  const color = good ? P.good : P.warn;
+  return (
+    <View style={[cardStyle, styles.feedback]}>
+      {good ? <CircleCheck size={16} color={color} /> : <CircleAlert size={16} color={color} />}
+      <View style={{ flex: 1 }}>
+        <Text style={styles.feedbackTitle}>{title}</Text>
+        <Text style={styles.feedbackBody}>{body}</Text>
+      </View>
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
-  safeContainer: {
-    flex: 1,
-    backgroundColor: THEME.colors.background,
-  },
-  topHeader: {
-    paddingBottom: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: THEME.spacing.md,
-    backgroundColor: THEME.colors.backgroundElevated,
-    borderBottomWidth: 1,
-    borderBottomColor: THEME.colors.border,
-  },
-  backBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  backText: {
-    fontSize: 13,
-    color: THEME.colors.textPrimary,
-    fontWeight: '600',
-  },
-  headerTitleWrap: {
-    flex: 1,
-    paddingHorizontal: 8,
-    alignItems: 'center',
-  },
-  headerTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: THEME.colors.textPrimary,
-  },
-  editRefBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: THEME.colors.surface,
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    borderRadius: THEME.borderRadius.sm,
-    gap: 4,
-    borderWidth: 1,
-    borderColor: THEME.colors.border,
-  },
-  editRefText: {
-    fontSize: 11,
-    color: '#FFF',
-    fontWeight: '600',
-  },
-  stageViewport: {
-    flex: 1,
+  root: { flex: 1, backgroundColor: P.bg },
+
+  stageFullscreen: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: '#000',
-    position: 'relative',
     overflow: 'hidden',
   },
-  floatingScoreBadge: {
+  stageCard: {
+    marginHorizontal: 10,
+    borderRadius: 16,
+    overflow: 'hidden',
+    backgroundColor: '#000',
+    borderWidth: 1,
+    borderColor: P.border,
+  },
+  miniBtn: {
     position: 'absolute',
-    top: 10,
-    left: 10,
-    zIndex: 10,
+    top: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(10, 11, 24, 0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 20,
   },
-  scoreSection: {
-    backgroundColor: THEME.colors.backgroundElevated,
-    paddingVertical: 4,
+  miniLeft: { left: 8 },
+  reanalyzeBtn: {
+    position: 'absolute',
+    top: 8,
+    right: 42,
+    height: 28,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 9,
+    borderRadius: 14,
+    backgroundColor: 'rgba(10, 11, 24, 0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.14)',
+    zIndex: 20,
   },
+  reanalyzeText: { fontSize: 10, fontWeight: '700', color: '#FFF' },
+  miniRight: { right: 8 },
+  scorePill: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    backgroundColor: 'rgba(10, 11, 24, 0.55)',
+  },
+  scoreValue: { fontSize: 12, fontWeight: '800' },
+  scoreLabel: { fontSize: 10, color: P.textDim, fontWeight: '600' },
+
+  fsMetrics: { position: 'absolute', left: 8 },
+  fsBottom: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    backgroundColor: 'rgba(10, 11, 24, 0.45)',
+  },
+  fsPlay: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fsStep: { fontSize: 9.5, fontWeight: '700', color: '#FFF', marginBottom: 1 },
+
+  scroll: { flex: 1 },
+  scrollContent: { paddingHorizontal: 10, paddingVertical: 8, gap: 8 },
+
+  feedback: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  feedbackTitle: { fontSize: 12.5, fontWeight: '700', color: P.text },
+  feedbackBody: { fontSize: 11, color: P.textDim, marginTop: 2, lineHeight: 15 },
 });

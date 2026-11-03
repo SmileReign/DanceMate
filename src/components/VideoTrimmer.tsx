@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { Play, Pause, Sparkles } from 'lucide-react-native';
 import { THEME } from '../constants/theme';
+import { useScrub, useThrottled } from './practice/useScrub';
 
 interface VideoTrimmerProps {
   duration: number; // total video duration in seconds
@@ -21,6 +22,8 @@ interface VideoTrimmerProps {
   onPlayPause: () => void;
   onConfirm: () => void;
   onResetOrFull: () => void;
+  /** Called when a trim handle is grabbed (e.g. to pause the video so the frame can be seen). */
+  onDragStart?: () => void;
   confirmLabel?: string;
   cancelLabel?: string;
 }
@@ -38,14 +41,21 @@ export const VideoTrimmer: React.FC<VideoTrimmerProps> = ({
   onPlayPause,
   onConfirm,
   onResetOrFull,
+  onDragStart,
   confirmLabel = 'Analyze Dance ⚡',
   cancelLabel = 'Full Video',
 }) => {
   const trackWidthRef = useRef<number>(300);
-  const dragStartX = useRef<number>(0);
-  const dragStartSec = useRef<number>(0);
-  const dragEndX = useRef<number>(0);
-  const dragEndSec = useRef<number>(0);
+  // While a handle is dragged it moves locally (smooth); the parent only hears about the new
+  // trim on release, and the video is moved to the handle's frame a few times a second.
+  const [drag, setDrag] = useState<{ start: number; end: number } | null>(null);
+  const dragFromRef = useRef({ start: 0, end: 0 });
+  const leftOriginRef = useRef(0);
+  const rightOriginRef = useRef(0);
+  const seekSoon = useThrottled(onSeek, 120);
+
+  const shownStart = drag ? drag.start : trimStart;
+  const shownEnd = drag ? drag.end : trimEnd;
 
   const formatTime = (sec: number) => {
     const s = Math.max(0, sec);
@@ -56,7 +66,7 @@ export const VideoTrimmer: React.FC<VideoTrimmerProps> = ({
   };
 
   const safeDuration = Math.max(0.1, duration);
-  const routineLength = Math.max(0, trimEnd - trimStart);
+  const routineLength = Math.max(0, shownEnd - shownStart);
 
   const handleTrackLayout = (e: LayoutChangeEvent) => {
     const w = e.nativeEvent.layout.width;
@@ -66,17 +76,69 @@ export const VideoTrimmer: React.FC<VideoTrimmerProps> = ({
   };
 
   // Convert seconds to percentages for layout
-  const startPercent = Math.max(0, Math.min(100, (trimStart / safeDuration) * 100));
-  const endPercent = Math.max(0, Math.min(100, (trimEnd / safeDuration) * 100));
+  const startPercent = Math.max(0, Math.min(100, (shownStart / safeDuration) * 100));
+  const endPercent = Math.max(0, Math.min(100, (shownEnd / safeDuration) * 100));
+
+  const pxToSec = (dx: number) => (dx / (trackWidthRef.current || 300)) * safeDuration;
+  const round = (v: number) => parseFloat(v.toFixed(1));
+
+  const beginDrag = () => {
+    dragFromRef.current = { start: trimStart, end: trimEnd };
+    setDrag({ start: trimStart, end: trimEnd });
+    onDragStart?.();
+  };
+  const finishDrag = (next: { start: number; end: number }) => {
+    seekSoon.cancel();
+    setDrag(null);
+    onTrimChange(next.start, next.end);
+  };
+
+  // x values are relative to where the finger first touched the handle.
+  const leftHandle = useScrub({
+    onStart: (x) => {
+      leftOriginRef.current = x;
+      beginDrag();
+    },
+    onMove: (x) => {
+      const from = dragFromRef.current;
+      const start = round(Math.max(0, Math.min(from.start + pxToSec(x - leftOriginRef.current), from.end - 0.5)));
+      setDrag({ start, end: from.end });
+      seekSoon(start);
+    },
+    onEnd: (x) => {
+      const from = dragFromRef.current;
+      const start = round(Math.max(0, Math.min(from.start + pxToSec(x - leftOriginRef.current), from.end - 0.5)));
+      finishDrag({ start, end: from.end });
+      onSeek(start);
+    },
+  });
+  const rightHandle = useScrub({
+    onStart: (x) => {
+      rightOriginRef.current = x;
+      beginDrag();
+    },
+    onMove: (x) => {
+      const from = dragFromRef.current;
+      const end = round(Math.min(safeDuration, Math.max(from.end + pxToSec(x - rightOriginRef.current), from.start + 0.5)));
+      setDrag({ start: from.start, end });
+      seekSoon(end);
+    },
+    onEnd: (x) => {
+      const from = dragFromRef.current;
+      const end = round(Math.min(safeDuration, Math.max(from.end + pxToSec(x - rightOriginRef.current), from.start + 0.5)));
+      finishDrag({ start: from.start, end });
+      onSeek(end);
+    },
+  });
   const playheadPercent = Math.max(0, Math.min(100, (currentTime / safeDuration) * 100));
 
   return (
     <View style={styles.container}>
       {/* Timestamps Row */}
       <View style={styles.timeRow}>
-        <Text style={styles.timeBadge}>{formatTime(trimStart)}</Text>
+        <Text style={styles.timeBadge}>{formatTime(shownStart)}</Text>
         <Text style={styles.durationBadge}>Dance: {routineLength.toFixed(1)}s</Text>
-        <Text style={styles.timeBadge}>{formatTime(trimEnd)}</Text>
+        <Text style={styles.timeBadge}>{formatTime(shownEnd)}</Text>
       </View>
 
       {/* Manual Drag Trim Track (Standard Editing App Filmstrip Style) */}
@@ -122,21 +184,8 @@ export const VideoTrimmer: React.FC<VideoTrimmerProps> = ({
         {/* Left Drag Handle */}
         <View
           style={[styles.handle, styles.handleLeft, { left: `${startPercent}%` }]}
-          onStartShouldSetResponder={() => true}
-          onResponderGrant={(e) => {
-            dragStartX.current = e.nativeEvent.pageX;
-            dragStartSec.current = trimStart;
-          }}
-          onResponderMove={(e) => {
-            const dx = e.nativeEvent.pageX - dragStartX.current;
-            const w = trackWidthRef.current || 300;
-            const deltaSec = (dx / w) * duration;
-            const maxStart = trimEnd - 0.5;
-            const newStart = Math.max(0, Math.min(dragStartSec.current + deltaSec, maxStart));
-            const rounded = parseFloat(newStart.toFixed(1));
-            onTrimChange(rounded, trimEnd);
-            onSeek(rounded);
-          }}
+          hitSlop={{ top: 8, bottom: 8, left: 14, right: 6 }}
+          {...leftHandle}
         >
           <View style={styles.handleGripLine} />
           <View style={styles.handleGripLine} />
@@ -149,21 +198,8 @@ export const VideoTrimmer: React.FC<VideoTrimmerProps> = ({
             styles.handleRight,
             { left: `${endPercent}%`, transform: [{ translateX: -HANDLE_WIDTH }] },
           ]}
-          onStartShouldSetResponder={() => true}
-          onResponderGrant={(e) => {
-            dragEndX.current = e.nativeEvent.pageX;
-            dragEndSec.current = trimEnd;
-          }}
-          onResponderMove={(e) => {
-            const dx = e.nativeEvent.pageX - dragEndX.current;
-            const w = trackWidthRef.current || 300;
-            const deltaSec = (dx / w) * duration;
-            const minEnd = trimStart + 0.5;
-            const newEnd = Math.min(duration, Math.max(dragEndSec.current + deltaSec, minEnd));
-            const rounded = parseFloat(newEnd.toFixed(1));
-            onTrimChange(trimStart, rounded);
-            onSeek(rounded);
-          }}
+          hitSlop={{ top: 8, bottom: 8, left: 6, right: 14 }}
+          {...rightHandle}
         >
           <View style={styles.handleGripLine} />
           <View style={styles.handleGripLine} />

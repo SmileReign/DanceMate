@@ -7,6 +7,8 @@ export interface DanceVideoPlayerRef {
   pauseAsync: () => Promise<void>;
   setPositionAsync: (positionMillis: number) => Promise<void>;
   setRateAsync: (rate: number) => Promise<void>;
+  /** Exact playback position right now, in seconds (more precise than the last time update). */
+  getCurrentTime: () => number;
   getNativeVideoElement: () => HTMLVideoElement | null;
   waitForReadyAsync: (timeoutMs?: number) => Promise<boolean>;
   getVideoDuration: () => number;
@@ -81,7 +83,7 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
           if (Platform.OS === 'web' && webVideoRef.current) {
             const v = webVideoRef.current;
             if (Math.abs(v.currentTime - targetSeconds) < 0.05 && !v.seeking) {
-              if (onPlaybackUpdate) onPlaybackUpdate(targetSeconds, v.duration || 1);
+              if (onPlaybackUpdate) onPlaybackUpdate(targetSeconds, v.duration || 0);
               return;
             }
             await new Promise<void>((resolve) => {
@@ -97,12 +99,12 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
               v.addEventListener('seeked', onSeeked);
               v.currentTime = targetSeconds;
             });
-            if (onPlaybackUpdate) onPlaybackUpdate(targetSeconds, v.duration || 1);
+            if (onPlaybackUpdate) onPlaybackUpdate(targetSeconds, v.duration || 0);
           } else if (player) {
             try {
               player.currentTime = targetSeconds;
               if (onPlaybackUpdate) {
-                onPlaybackUpdate(targetSeconds, player.duration || 1);
+                onPlaybackUpdate(targetSeconds, player.duration || 0);
               }
             } catch {}
           }
@@ -114,6 +116,14 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
             try {
               player.playbackRate = rate;
             } catch {}
+          }
+        },
+        getCurrentTime: () => {
+          if (Platform.OS === 'web' && webVideoRef.current) return webVideoRef.current.currentTime || 0;
+          try {
+            return player?.currentTime ?? 0;
+          } catch {
+            return 0;
           }
         },
         getNativeVideoElement: () => {
@@ -198,13 +208,13 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
 
       const timeSub = player.addListener('timeUpdate', (event) => {
         if (onPlaybackUpdate) {
-          onPlaybackUpdate(event.currentTime, player.duration || 1);
+          onPlaybackUpdate(event.currentTime, player.duration || 0);
         }
       });
 
       const loadSub = player.addListener('sourceLoad', (event) => {
         if (onPlaybackUpdate) {
-          onPlaybackUpdate(player.currentTime, event.duration || 1);
+          onPlaybackUpdate(player.currentTime, event.duration || 0);
         }
       });
 
@@ -257,7 +267,7 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
               if (webVideoRef.current && onPlaybackUpdate) {
                 onPlaybackUpdate(
                   webVideoRef.current.currentTime,
-                  webVideoRef.current.duration || 1
+                  webVideoRef.current.duration || 0
                 );
               }
             }}
@@ -282,7 +292,7 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
                 if (onPlaybackUpdate) {
                   onPlaybackUpdate(
                     webVideoRef.current.currentTime,
-                    webVideoRef.current.duration || 1
+                    webVideoRef.current.duration || 0
                   );
                 }
                 if (onDimensionsChange && webVideoRef.current.videoWidth > 0) {
@@ -305,7 +315,10 @@ export const DanceVideoPlayer = forwardRef<DanceVideoPlayerRef, DanceVideoPlayer
           player={player}
           contentFit={fitMode}
           nativeControls={false}
-          surfaceType={isFlipped ? 'textureView' : 'surfaceView'}
+          // Always a TextureView: it layers correctly under the camera and skeleton overlays
+          // (a SurfaceView can cover them or freeze when resized), and expo-video does not
+          // allow switching the surface type while the app runs.
+          surfaceType="textureView"
           style={[
             StyleSheet.absoluteFill,
             isFlipped ? { transform: [{ scaleX: -1 }] } : undefined,

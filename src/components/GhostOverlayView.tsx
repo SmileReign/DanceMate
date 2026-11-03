@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { View, StyleSheet, LayoutChangeEvent } from 'react-native';
-import { Landmark, AlignmentSettings } from '../types/dance';
+import { Landmark, AlignmentSettings, ReferencePlayback, BodyFocus } from '../types/dance';
 import { SkeletonOverlay } from './SkeletonOverlay';
+import { SmoothPoseOverlay, ReferenceHalfMask } from './SmoothPoseOverlay';
 import { LiveCameraFeed } from './LiveCameraFeed';
 import { DanceVideoPlayer, DanceVideoPlayerRef } from './DanceVideoPlayer';
-import { AlignmentControls } from './AlignmentControls';
 import { THEME } from '../constants/theme';
+import { isNativePoseAvailable } from '../../modules/dancemate-pose';
 
 interface GhostOverlayViewProps {
   sourceUri: string;
@@ -14,17 +15,25 @@ interface GhostOverlayViewProps {
   isFlipped: boolean;
   ghostOpacity: number;
   cameraFacing: 'front' | 'back';
-  referenceLandmarks: Landmark[] | null;
+  reference: ReferencePlayback;
+  showLiveSkeleton?: boolean;
+  showReferenceSkeleton?: boolean;
+  bodyFocus?: BodyFocus;
   liveLandmarks: Landmark[] | null;
   highlightJoints: number[];
   alignment: AlignmentSettings;
   videoPlayerRef: React.RefObject<DanceVideoPlayerRef | null>;
   onPlaybackUpdate: (pos: number, dur: number) => void;
   onLiveLandmarksDetected: (landmarks: Landmark[] | null) => void;
-  onChangeAlignment: (alignment: AlignmentSettings) => void;
-  onResetAlignment: () => void;
 }
 
+/**
+ * The reference dancer as a see-through "ghost" over your own camera picture.
+ *
+ * Android layers (bottom to top): reference video -> camera picture (partly transparent)
+ * with your skeleton drawn on the same frame -> reference skeleton. Your skeleton stays
+ * fully bright and in sync; only the pictures are blended.
+ */
 export const GhostOverlayView: React.FC<GhostOverlayViewProps> = ({
   sourceUri,
   isPlaying,
@@ -32,63 +41,105 @@ export const GhostOverlayView: React.FC<GhostOverlayViewProps> = ({
   isFlipped,
   ghostOpacity,
   cameraFacing,
-  referenceLandmarks,
+  reference,
+  showLiveSkeleton = true,
+  showReferenceSkeleton = true,
+  bodyFocus = 'full',
   liveLandmarks,
   highlightJoints,
   alignment,
   videoPlayerRef,
   onPlaybackUpdate,
   onLiveLandmarksDetected,
-  onChangeAlignment,
-  onResetAlignment,
 }) => {
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const opacity = Math.max(0.1, Math.min(0.9, ghostOpacity));
 
   const handleLayout = (e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
     setDimensions({ width, height });
   };
 
-  return (
-    <View style={styles.container} onLayout={handleLayout}>
-      {/* 1. Base Layer: Live Camera Feed */}
-      <LiveCameraFeed
-        facing={cameraFacing}
-        onLandmarksDetected={onLiveLandmarksDetected}
+  // Translate listed first so the offset isn't scaled: same math as the skeleton overlay
+  // (scale around the center, then shift), keeping video and skeleton locked together.
+  const alignedTransform = [
+    { translateX: alignment.offsetX },
+    { translateY: alignment.offsetY },
+    { scale: alignment.scale },
+  ];
+
+  const ghostVideo = (
+    <View
+      style={[
+        StyleSheet.absoluteFill,
+        {
+          opacity: isNativePoseAvailable ? 1 : opacity,
+          pointerEvents: 'none',
+          transform: alignedTransform,
+        },
+      ]}
+    >
+      <DanceVideoPlayer
+        ref={videoPlayerRef}
+        sourceUri={sourceUri}
+        isPlaying={isPlaying}
+        playbackSpeed={playbackSpeed}
+        isFlipped={isFlipped}
+        isMuted={false}
+        onPlaybackUpdate={onPlaybackUpdate}
         style={StyleSheet.absoluteFill}
       />
+      {/* Inside the aligned layer, so the cut moves and scales with the ghost video */}
+      <ReferenceHalfMask
+        poseData={reference.poseData}
+        currentTime={reference.currentTime}
+        isPlaying={reference.isPlaying}
+        playbackRate={reference.rate}
+        videoSize={reference.videoSize}
+        width={dimensions.width}
+        height={dimensions.height}
+        bodyFocus={bodyFocus}
+      />
+    </View>
+  );
 
-      {/* 2. Middle Layer: Translucent Reference Dance Video */}
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          {
-            opacity: Math.max(0.1, Math.min(0.9, ghostOpacity)),
-            pointerEvents: 'none',
-            transform: [
-              { scale: alignment.scale },
-              { translateX: alignment.offsetX },
-              { translateY: alignment.offsetY },
-            ],
-          },
-        ]}
-      >
-        <DanceVideoPlayer
-          ref={videoPlayerRef}
-          sourceUri={sourceUri}
-          isPlaying={isPlaying}
-          playbackSpeed={playbackSpeed}
-          isFlipped={isFlipped}
-          isMuted={false}
-          onPlaybackUpdate={onPlaybackUpdate}
-          style={StyleSheet.absoluteFill}
-        />
-      </View>
+  return (
+    <View style={styles.container} onLayout={handleLayout}>
+      {isNativePoseAvailable ? (
+        <>
+          {ghostVideo}
+          <LiveCameraFeed
+            facing={cameraFacing}
+            onLandmarksDetected={onLiveLandmarksDetected}
+            frameOpacity={1 - opacity}
+            nativeSkeleton={showLiveSkeleton ? {
+              color: THEME.colors.skeletonLive,
+              jointColor: THEME.colors.skeletonLiveJoint,
+              highlightJoints,
+            } : undefined}
+            style={StyleSheet.absoluteFill}
+          />
+        </>
+      ) : (
+        <>
+          <LiveCameraFeed
+            facing={cameraFacing}
+            onLandmarksDetected={onLiveLandmarksDetected}
+            style={StyleSheet.absoluteFill}
+          />
+          {ghostVideo}
+        </>
+      )}
 
-      {/* 3. Top Layer: Reference Skeleton (Cyan, aligned with reference dancer) */}
-      {dimensions.width > 0 && dimensions.height > 0 && (
-        <SkeletonOverlay
-          landmarks={referenceLandmarks}
+      {/* Reference skeleton, aligned with the ghost video */}
+      {showReferenceSkeleton && dimensions.width > 0 && dimensions.height > 0 && (
+        <SmoothPoseOverlay
+          poseData={reference.poseData}
+          flip={reference.flip}
+          currentTime={reference.currentTime}
+          isPlaying={reference.isPlaying}
+          playbackRate={reference.rate}
+          videoSize={reference.videoSize}
           width={dimensions.width}
           height={dimensions.height}
           color={THEME.colors.skeletonReference}
@@ -97,12 +148,13 @@ export const GhostOverlayView: React.FC<GhostOverlayViewProps> = ({
           scale={alignment.scale}
           offsetX={alignment.offsetX}
           offsetY={alignment.offsetY}
+          bodyFocus={bodyFocus}
           isReference={true}
         />
       )}
 
-      {/* 4. Topmost Layer: Live Dancer Skeleton (Electric Rose/Amber with joint highlights) */}
-      {dimensions.width > 0 && dimensions.height > 0 && (
+      {/* Web only: live skeleton drawn in JS (Android draws it natively on the camera frame) */}
+      {showLiveSkeleton && !isNativePoseAvailable && dimensions.width > 0 && dimensions.height > 0 && (
         <SkeletonOverlay
           landmarks={liveLandmarks}
           width={dimensions.width}
@@ -113,15 +165,6 @@ export const GhostOverlayView: React.FC<GhostOverlayViewProps> = ({
           opacity={1.0}
         />
       )}
-
-      {/* 5. Overlay Alignment Controls (docked at bottom of viewport) */}
-      <View style={styles.alignmentDock}>
-        <AlignmentControls
-          alignment={alignment}
-          onChangeAlignment={onChangeAlignment}
-          onReset={onResetAlignment}
-        />
-      </View>
     </View>
   );
 };
@@ -132,12 +175,5 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
     position: 'relative',
     overflow: 'hidden',
-  },
-  alignmentDock: {
-    position: 'absolute',
-    bottom: 8,
-    left: 0,
-    right: 0,
-    zIndex: 10,
   },
 });

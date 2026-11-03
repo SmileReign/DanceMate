@@ -86,12 +86,7 @@ export const LANDMARK_NAMES: Record<number, string> = {
 
 // Topological pairs representing bones connecting body joints (35 standard connections)
 export const SKELETON_CONNECTIONS: [number, number][] = [
-  // Head & Face
-  [POSE_LANDMARKS.NOSE, POSE_LANDMARKS.LEFT_EYE],
-  [POSE_LANDMARKS.NOSE, POSE_LANDMARKS.RIGHT_EYE],
-  [POSE_LANDMARKS.LEFT_EYE, POSE_LANDMARKS.LEFT_EAR],
-  [POSE_LANDMARKS.RIGHT_EYE, POSE_LANDMARKS.RIGHT_EAR],
-  [POSE_LANDMARKS.MOUTH_LEFT, POSE_LANDMARKS.MOUTH_RIGHT],
+  // Head: a single point (the nose) is drawn, no face lines.
 
   // Torso / Shoulders Box
   [POSE_LANDMARKS.LEFT_SHOULDER, POSE_LANDMARKS.RIGHT_SHOULDER],

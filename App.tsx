@@ -25,6 +25,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<MainTab>('home');
   const [selectedProject, setSelectedProject] = useState<DanceProject | null>(null);
   const [projects, setProjects] = useState<DanceProject[]>([]);
+  // A screen in full-screen mode hides the bottom tab bar.
+  const [hideTabs, setHideTabs] = useState(false);
+  // Set when Practice asks to re-analyze: the tracking screen starts the analysis by itself.
+  const [autoReanalyze, setAutoReanalyze] = useState(false);
   const [navStack, setNavStack] = useState<NavState[]>([
     { screen: 'home', tab: 'home', project: null },
   ]);
@@ -97,7 +101,8 @@ export default function App() {
 
   // Determine if bottom navigation should be visible
   const isTabVisible =
-    currentScreen === 'home' || currentScreen === 'library' || currentScreen === 'live-camera';
+    !hideTabs &&
+    (currentScreen === 'home' || currentScreen === 'library' || currentScreen === 'live-camera');
 
   return (
     <SafeAreaProvider>
@@ -120,6 +125,7 @@ export default function App() {
         {currentScreen === 'live-camera' && (
           <LiveMotionTrackingScreen
             onBackToHome={handleGoBack}
+            onFullscreenChange={setHideTabs}
             projects={projects}
             onSelectProjectForPractice={handleSelectProjectForPractice}
           />
@@ -139,6 +145,8 @@ export default function App() {
         {currentScreen === 'tracking' && selectedProject && (
           <ReferenceTrackingScreen
             project={selectedProject}
+            autoReanalyze={autoReanalyze}
+            onAutoReanalyzeStarted={() => setAutoReanalyze(false)}
             onSaveAndStartPractice={handleSaveAndStartPractice}
             onBack={handleGoBack}
           />
@@ -149,7 +157,8 @@ export default function App() {
           <PracticeScreen
             project={selectedProject}
             onBackToLibrary={handleGoBack}
-            onOpenTrackingStage={(proj) => {
+            onOpenTrackingStage={(proj, options) => {
+              setAutoReanalyze(!!options?.reanalyze);
               navigateTo('tracking', 'library', proj);
             }}
           />

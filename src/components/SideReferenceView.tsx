@@ -6,7 +6,9 @@ import {
   TouchableOpacity,
   LayoutChangeEvent,
 } from 'react-native';
-import { Landmark } from '../types/dance';
+import { Landmark, ReferencePlayback, BodyFocus } from '../types/dance';
+import { SmoothPoseOverlay, ReferenceHalfMask } from './SmoothPoseOverlay';
+import { isNativePoseAvailable } from '../../modules/dancemate-pose';
 import { SkeletonOverlay } from './SkeletonOverlay';
 import { LiveCameraFeed } from './LiveCameraFeed';
 import { DanceVideoPlayer, DanceVideoPlayerRef } from './DanceVideoPlayer';
@@ -19,7 +21,10 @@ interface SideReferenceViewProps {
   playbackSpeed: number;
   isFlipped: boolean;
   cameraFacing: 'front' | 'back';
-  referenceLandmarks: Landmark[] | null;
+  reference: ReferencePlayback;
+  showLiveSkeleton?: boolean;
+  showReferenceSkeleton?: boolean;
+  bodyFocus?: BodyFocus;
   liveLandmarks: Landmark[] | null;
   highlightJoints: number[];
   videoPlayerRef: React.RefObject<DanceVideoPlayerRef | null>;
@@ -36,7 +41,10 @@ export const SideReferenceView: React.FC<SideReferenceViewProps> = ({
   playbackSpeed,
   isFlipped,
   cameraFacing,
-  referenceLandmarks,
+  reference,
+  showLiveSkeleton = true,
+  showReferenceSkeleton = true,
+  bodyFocus = 'full',
   liveLandmarks,
   highlightJoints,
   videoPlayerRef,
@@ -86,11 +94,16 @@ export const SideReferenceView: React.FC<SideReferenceViewProps> = ({
       <LiveCameraFeed
         facing={cameraFacing}
         onLandmarksDetected={onLiveLandmarksDetected}
+        nativeSkeleton={showLiveSkeleton ? {
+          color: THEME.colors.skeletonLive,
+          jointColor: THEME.colors.skeletonLiveJoint,
+          highlightJoints,
+        } : undefined}
         style={StyleSheet.absoluteFill}
       />
 
-      {/* Live Dancer Skeleton */}
-      {mainDim.width > 0 && mainDim.height > 0 && (
+      {/* Live Dancer Skeleton (web; Android draws it natively on the camera frame) */}
+      {showLiveSkeleton && !isNativePoseAvailable && mainDim.width > 0 && mainDim.height > 0 && (
         <SkeletonOverlay
           landmarks={liveLandmarks}
           width={mainDim.width}
@@ -119,16 +132,34 @@ export const SideReferenceView: React.FC<SideReferenceViewProps> = ({
           onPlaybackUpdate={onPlaybackUpdate}
           style={StyleSheet.absoluteFill}
         />
+        <ReferenceHalfMask
+          poseData={reference.poseData}
+          currentTime={reference.currentTime}
+          isPlaying={reference.isPlaying}
+          playbackRate={reference.rate}
+          videoSize={reference.videoSize}
+          width={refDim.width}
+          height={refDim.height}
+          bodyFocus={bodyFocus}
+        />
 
-        {refDim.width > 0 && refDim.height > 0 && (
-          <SkeletonOverlay
-            landmarks={referenceLandmarks}
+        {showReferenceSkeleton && refDim.width > 0 && refDim.height > 0 && (
+          <SmoothPoseOverlay
+            poseData={reference.poseData}
+            flip={reference.flip}
+            currentTime={reference.currentTime}
+            isPlaying={reference.isPlaying}
+            playbackRate={reference.rate}
+            videoSize={reference.videoSize}
             width={refDim.width}
             height={refDim.height}
             color={THEME.colors.skeletonReference}
             jointColor={THEME.colors.skeletonReferenceJoint}
+            bodyFocus={bodyFocus}
             isReference={true}
-            strokeWidth={2}
+            // Solid, slightly thicker bones so the skeleton reads in the small panel.
+            forceSolidBones={true}
+            strokeWidth={2.5}
           />
         )}
 

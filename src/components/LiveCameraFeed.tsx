@@ -1,17 +1,34 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useCallback } from 'react';
 import { View, Text, StyleSheet, Platform, TouchableOpacity } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Landmark } from '../types/dance';
 import { PoseTracker } from '../services/poseTracker';
-import { flipLandmarks } from '../services/motionComparison';
+import { flipLandmarks, swapLeftRightLandmarks } from '../services/motionComparison';
+import { PoseCameraView, flatToLandmarks, type PoseEventPayload } from '../../modules/dancemate-pose';
 import { SkeletonOneEuroFilter } from '../services/oneEuroFilter';
 import { THEME } from '../constants/theme';
+import { FLIP_LANDMARK_MAP } from '../constants/skeletonJoints';
 import { Camera } from 'lucide-react-native';
+
+export interface NativeSkeletonStyle {
+  color: string;
+  jointColor: string;
+  strokeWidth?: number;
+  /** Joint indices as reported to onLandmarksDetected. */
+  highlightJoints?: number[];
+}
 
 interface LiveCameraFeedProps {
   facing: 'front' | 'back';
   isMirrored?: boolean;
   onLandmarksDetected: (landmarks: Landmark[] | null) => void;
+  /**
+   * Android: draw the live skeleton natively on the exact camera frame it was detected in
+   * (zero lag). When set, don't also draw the live skeleton in JS.
+   */
+  nativeSkeleton?: NativeSkeletonStyle;
+  /** Android: opacity of the camera picture, so a layer underneath can show through. */
+  frameOpacity?: number;
   children?: React.ReactNode;
   style?: any;
 }
@@ -20,6 +37,8 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
   facing,
   isMirrored = true,
   onLandmarksDetected,
+  nativeSkeleton,
+  frameOpacity = 1,
   children,
   style,
 }) => {
@@ -28,9 +47,30 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
   const webStreamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const oneEuroFilterRef = useRef(new SkeletonOneEuroFilter({ minCutoff: 1.5, beta: 2.8, dCutoff: 1.5 }));
+  const hadPoseRef = useRef(false);
+
+  // Android: landmarks come from the on-device tracker, already mapped to this view.
+  const handleNativePose = useCallback(
+    (event: { nativeEvent: PoseEventPayload }) => {
+      const lms = flatToLandmarks(event.nativeEvent.landmarks) as Landmark[] | null;
+      if (!lms) {
+        if (hadPoseRef.current) {
+          hadPoseRef.current = false;
+          onLandmarksDetected(null);
+        }
+        return;
+      }
+      hadPoseRef.current = true;
+      // Mirrored selfie view: label joints by screen side, as the web camera did.
+      onLandmarksDetected(facing === 'front' && isMirrored ? swapLeftRightLandmarks(lms) : lms);
+    },
+    [facing, isMirrored, onLandmarksDetected]
+  );
 
   // Real-time kinematics pose tracking loop with One Euro Filter (zero latency & jitterless)
   useEffect(() => {
+    // Only the web camera needs a JS detection loop; Android tracks natively.
+    if (Platform.OS !== 'web') return;
     let isRunning = true;
 
     const loop = () => {
@@ -135,6 +175,32 @@ export const LiveCameraFeed: React.FC<LiveCameraFeedProps> = ({
       );
     }
 
+    if (PoseCameraView) {
+      // Joint labels were swapped for the mirrored view; the native drawing uses model order.
+      const swapped = facing === 'front' && isMirrored;
+      const highlight = (nativeSkeleton?.highlightJoints ?? []).map((i) =>
+        swapped && FLIP_LANDMARK_MAP[i] !== undefined ? FLIP_LANDMARK_MAP[i] : i
+      );
+      return (
+        <View style={[styles.container, frameOpacity < 1 && styles.transparent, style]}>
+          <PoseCameraView
+            style={StyleSheet.absoluteFill}
+            facing={facing}
+            mirror={isMirrored}
+            model="full"
+            showSkeleton={!!nativeSkeleton}
+            skeletonColor={nativeSkeleton?.color}
+            jointColor={nativeSkeleton?.jointColor}
+            strokeWidth={nativeSkeleton?.strokeWidth ?? 3}
+            highlightJoints={highlight}
+            frameOpacity={frameOpacity}
+            onPose={handleNativePose}
+          />
+          {children}
+        </View>
+      );
+    }
+
     return (
       <View style={[styles.container, style]}>
         <CameraView
@@ -172,6 +238,9 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000000',
     overflow: 'hidden',
+  },
+  transparent: {
+    backgroundColor: 'transparent',
   },
   center: {
     alignItems: 'center',

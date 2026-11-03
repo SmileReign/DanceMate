@@ -70,9 +70,29 @@ export interface DanceProject {
   selectedDancerLabel?: string;
   trimStart?: number; // In seconds (start of dance routine)
   trimEnd?: number;   // In seconds (end of dance routine)
+  videoWidth?: number; // Upright pixel size of the video, used to line the skeleton up with it
+  videoHeight?: number;
+  /** Dance counts marked by the user: the time (seconds) of each beat, sorted. */
+  counts?: number[];
+  /** How many counts make one phrase, usually 8 ("one eight"). */
+  countsPerBar?: number;
 }
 
 export type ViewMode = 'ghost' | 'sideBySide' | 'sideReference';
+
+/** Which half of the reference dancer to show: practice footwork (lower) or handwork (upper). */
+export type BodyFocus = 'full' | 'upper' | 'lower';
+
+/** Everything needed to draw the reference skeleton in sync with its playing video. */
+export interface ReferencePlayback {
+  poseData: PoseFrame[];
+  flip: boolean;
+  currentTime: number;
+  isPlaying: boolean;
+  rate: number;
+  /** Upright pixel size of the reference video (to match its letterboxing). */
+  videoSize?: { width: number; height: number };
+}
 
 export interface JointAngleInfo {
   name: string;

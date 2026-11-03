@@ -120,6 +120,21 @@ export function flipLandmarks(landmarks: Landmark[]): Landmark[] {
 }
 
 /**
+ * Swaps left/right joint labels without moving any points. Used for the mirrored selfie
+ * camera, where the picture is already mirrored on screen but the app labels joints by the
+ * side of the screen they appear on (same as flipLandmarks did for the web camera).
+ */
+export function swapLeftRightLandmarks(landmarks: Landmark[]): Landmark[] {
+  if (!landmarks) return [];
+  const swapped: Landmark[] = new Array(landmarks.length);
+  for (let i = 0; i < landmarks.length; i++) {
+    const targetIdx = FLIP_LANDMARK_MAP[i] !== undefined ? FLIP_LANDMARK_MAP[i] : i;
+    swapped[targetIdx] = landmarks[i];
+  }
+  return swapped;
+}
+
+/**
  * Interpolates pose landmarks between recorded timestamps for seamless 60fps tracking
  */
 export function getInterpolatedPose(poseFrames: PoseFrame[], currentTimestamp: number): Landmark[] | null {
@@ -396,3 +411,40 @@ export function mapCoverLandmarks(
   }));
 }
 
+
+/**
+ * Maps landmarks normalized to a video frame onto a container where that video is shown
+ * with "contain" fit (letterboxed). Without this, the skeleton is stretched across the whole
+ * container and drifts off the dancer whenever the shapes differ.
+ */
+export function mapContainLandmarks(
+  landmarks: Landmark[] | null,
+  videoWidth: number | undefined,
+  videoHeight: number | undefined,
+  containerWidth: number,
+  containerHeight: number
+): Landmark[] | null {
+  if (!landmarks || !videoWidth || !videoHeight || containerWidth <= 0 || containerHeight <= 0) {
+    return landmarks;
+  }
+  const videoAspect = videoWidth / videoHeight;
+  const containerAspect = containerWidth / containerHeight;
+  if (Math.abs(videoAspect - containerAspect) < 0.001) return landmarks;
+
+  let scaleX = 1;
+  let scaleY = 1;
+  let offsetX = 0;
+  let offsetY = 0;
+  if (containerAspect > videoAspect) {
+    // Bars on the left and right
+    const renderedWidth = containerHeight * videoAspect;
+    scaleX = renderedWidth / containerWidth;
+    offsetX = (containerWidth - renderedWidth) / 2 / containerWidth;
+  } else {
+    // Bars on the top and bottom
+    const renderedHeight = containerWidth / videoAspect;
+    scaleY = renderedHeight / containerHeight;
+    offsetY = (containerHeight - renderedHeight) / 2 / containerHeight;
+  }
+  return landmarks.map((lm) => ({ ...lm, x: offsetX + lm.x * scaleX, y: offsetY + lm.y * scaleY }));
+}
